@@ -2,6 +2,14 @@
 
 Portable, provider-agnostic AI coding agent for local and online models.
 
+## Why NORYKA?
+
+NORYKA is named after **Nora (نورا)** and **Nikan (نیکان)** — the children of the
+project founder. The name is a personal dedication, coined from their names, and
+it is not a technical acronym or abbreviation. It carries no hidden meaning;
+it simply marks this project as something built with care, the way you build
+something for family.
+
 ## Status
 
 The repository is clean-clone oriented: credentials, runtime state, caches, logs, and model weights are user-owned and stay outside Git. The Python package, gateway, coding tools, security boundaries, CI gates, optional Cloudflare Worker, and a dependency-free Terminal UI are implemented.
