@@ -131,3 +131,10 @@ A phase is not complete because code exists. It requires evidence:
 - No public multi-tenant release before isolation and authorization are proven.
 - No blind copy of source code before license, dependency and platform compatibility review.
 - No rewrite of existing NORYKA/YasinCoder coding capabilities before mapping and tests.
+
+
+## 9. Hermes packaging constraint discovered during integration planning
+
+The pinned Hermes revision declares Python `>=3.11,<3.15`. Its `setup.py` intentionally blocks wheel/sdist builds outside a Nix build; the project README directs Android/Termux users to its signed aarch64 APT repository and the dedicated Termux guide, not the generic desktop shell installer.
+
+**Integration rule:** do not add Hermes as a normal `pip install .` dependency or assume a wheel can be built from the checkout. Phase 1 must use the supported Termux distribution path or a separately verified source-development path, then define a narrow NORYKA invocation/adapter boundary. Any change to upstream installation behavior requires its own compatibility evidence.
