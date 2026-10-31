@@ -52,11 +52,15 @@ class ConversationContext:
 class IdentityService:
     """Persist owner bootstrap, linked accounts, pairings, and audit events.
 
+    Audit history is bounded to the newest AUDIT_RETENTION_LIMIT records.
+
     `owners` is an explicit deployment-owned allowlist, for example
     {"telegram": {"123456789"}, "bale": {"998877"}}. An empty allowlist
     deliberately authenticates nobody as owner; first-sender bootstrap is
     never performed.
     """
+
+    AUDIT_RETENTION_LIMIT = 10_000
 
     def __init__(
         self,
@@ -204,6 +208,14 @@ class IdentityService:
                (event, channel, account_id, principal_id, occurred_at, details)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (event, channel, account_id, principal_id, self._clock(), details[:256]),
+        )
+        self._conn.execute(
+            """DELETE FROM noryka_identity_audit
+               WHERE id NOT IN (
+                   SELECT id FROM noryka_identity_audit
+                   ORDER BY id DESC LIMIT ?
+               )""",
+            (self.AUDIT_RETENTION_LIMIT,),
         )
 
     @_synchronized

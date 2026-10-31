@@ -145,6 +145,17 @@ class IdentityServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.resolve_identity("", "user-1")
 
+    def test_audit_retention_is_bounded_for_repeated_denials(self):
+        self.service.AUDIT_RETENTION_LIMIT = 3
+        for index in range(7):
+            self.service.resolve_identity("telegram", f"untrusted-{index}")
+        events = self.service.audit_events()
+        self.assertEqual(len(events), 3)
+        self.assertEqual(
+            [event["account_id"] for event in events],
+            ["untrusted-4", "untrusted-5", "untrusted-6"],
+        )
+
     def test_audit_records_pairing_and_rejections(self):
         code, _ = self.service.create_pairing_code(self.owner)
         self.service.claim_pairing_code(code, "telegram", "user-200")

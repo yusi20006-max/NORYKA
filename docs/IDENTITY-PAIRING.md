@@ -50,7 +50,9 @@ approvals remain in Issue #15.
 ## Persistence and audit
 
 Identity links, pairing token hashes, and audit events use SQLite in the
-existing user data directory (outside the checkout). Conversation scopes are
+existing user data directory (outside the checkout). Audit history is bounded
+to the newest 10,000 records so repeated untrusted requests cannot grow this
+table without limit. Conversation scopes are
 derived deterministically from the verified channel identity and the platform
 conversation identifier; they are identifiers, not authorization credentials.
 Revocation is retained as a timestamp for auditability; an explicitly re-paired account reactivates the existing link record. Pairing attempts are recorded without
