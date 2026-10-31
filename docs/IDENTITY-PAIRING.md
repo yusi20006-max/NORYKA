@@ -1,0 +1,55 @@
+# Identity and pairing boundary
+
+## Trust model
+
+NORYKA identity is resolved only at a trusted channel-adapter boundary. The
+adapter must extract the immutable platform account identifier from a verified
+Telegram/Bale update. Display names, usernames, message text, forwarded
+metadata, model output, and tool arguments are never identity evidence.
+
+The identity service accepts the channel name and canonical platform account
+ID from that adapter and returns an immutable `IdentityContext`. No adapter
+exists in this phase; Telegram/Bale wiring belongs to Issue #8.
+
+## Owner bootstrap
+
+Owners are configured explicitly by deployment as a channel-to-account-ID
+allowlist. An empty or missing allowlist authenticates no owner. There is no
+first-sender-wins bootstrap and no automatic promotion of the first user.
+
+Example application wiring (configuration is supplied by the deployment,
+not by a chat request):
+
+```python
+identity = IdentityService(
+    owners={"telegram": {"<verified-platform-account-id>"}}
+)
+```
+
+Do not commit actual account IDs or other deployment secrets into the repo.
+
+## Pairing
+
+An authenticated owner creates a short-lived random pairing code. Only a
+SHA-256 digest is persisted. The code is returned once, expires, and is
+atomically consumed by the first successful claim. A channel adapter may call
+`claim_pairing_code` only after it has independently verified the sender's
+platform account ID.
+
+Pairing does not authorize privileged tools or side effects. It establishes
+only the channel-account-to-principal association. Tool policy and operation
+approvals remain in Issue #15.
+
+## Persistence and audit
+
+Identity links, pairing token hashes, and audit events use SQLite in the
+existing user data directory (outside the checkout). Revocation is retained
+as a timestamp for auditability. Pairing attempts are recorded without
+persisting raw pairing codes.
+
+## Security limitations
+
+This module is a core service, not a complete Telegram/Bale authentication
+integration. Until Issue #8 supplies verified adapters and runtime wiring,
+there is no production channel identity enforcement. The service must not be
+treated as an OS sandbox or as tool authorization.
