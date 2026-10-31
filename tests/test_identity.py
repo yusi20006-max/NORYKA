@@ -120,6 +120,8 @@ class IdentityServiceTests(unittest.TestCase):
         replacement_code, _ = self.service.create_pairing_code(self.owner)
         replacement = self.service.claim_pairing_code(replacement_code, "bale", "user-300")
         self.assertEqual(replacement.principal_id, self.owner.principal_id)
+        self.assertFalse(self.service.verify_context(linked))
+        self.assertTrue(self.service.verify_context(replacement))
         self.assertIsNotNone(self.service.resolve_identity("bale", "user-300"))
 
     def test_non_owner_cannot_unlink_or_revoke_pairing(self):

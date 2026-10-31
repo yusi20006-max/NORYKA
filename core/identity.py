@@ -111,14 +111,19 @@ class IdentityService:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def _context_proof(self, principal_id: str, channel: str, account_id: str,
-                       is_owner: bool, auth_method: str) -> str:
+                       is_owner: bool, auth_method: str, identity_version: str = "") -> str:
         separator = chr(0)
-        message = separator.join((principal_id, channel, account_id, str(is_owner), auth_method))
+        message = separator.join((
+            principal_id, channel, account_id, str(is_owner), auth_method, identity_version
+        ))
         return hmac.new(self._context_key, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def _make_context(self, principal_id: str, channel: str, account_id: str,
-                      is_owner: bool, auth_method: str) -> IdentityContext:
-        proof = self._context_proof(principal_id, channel, account_id, is_owner, auth_method)
+                      is_owner: bool, auth_method: str,
+                      identity_version: str = "") -> IdentityContext:
+        proof = self._context_proof(
+            principal_id, channel, account_id, is_owner, auth_method, identity_version
+        )
         return IdentityContext(principal_id, channel, account_id, is_owner, auth_method, proof)
 
     @_synchronized
@@ -135,28 +140,35 @@ class IdentityService:
             auth_method = self._identifier(context.auth_method, "auth_method")
         except ValueError:
             return False
-        expected = self._context_proof(
-            principal_id, channel, account_id, context.is_owner, auth_method,
-        )
         if not isinstance(context.proof, str) or not context.proof:
             return False
-        if not hmac.compare_digest(context.proof, expected):
-            return False
         if context.is_owner:
-            return (
-                auth_method == "owner_allowlist"
-                and account_id in self.owners.get(channel, ())
-                and principal_id == self._principal_id(channel, account_id)
-            )
-        if auth_method != "pairing":
-            return False
-        row = self._conn.execute(
-            """SELECT 1 FROM noryka_identity_links
-               WHERE channel=? AND account_id=? AND principal_id=?
-                 AND revoked_at IS NULL""",
-            (channel, account_id, principal_id),
-        ).fetchone()
-        return row is not None
+            if (
+                auth_method != "owner_allowlist"
+                or account_id not in self.owners.get(channel, ())
+                or principal_id != self._principal_id(channel, account_id)
+            ):
+                return False
+            identity_version = ""
+        else:
+            if auth_method != "pairing":
+                return False
+            row = self._conn.execute(
+                """SELECT identity_version FROM noryka_identity_links
+                   WHERE channel=? AND account_id=? AND principal_id=?
+                     AND revoked_at IS NULL""",
+                (channel, account_id, principal_id),
+            ).fetchone()
+            if row is None:
+                return False
+            # A new pairing creates a new generation. Old contexts stay invalid
+            # even if the same channel account is later paired again.
+            identity_version = row["identity_version"]
+        expected = self._context_proof(
+            principal_id, channel, account_id, context.is_owner,
+            auth_method, identity_version,
+        )
+        return hmac.compare_digest(context.proof, expected)
 
     def resolve_conversation(self, context: IdentityContext, channel_conversation_id: str) -> ConversationContext:
         """Create a stable conversation scope only from a verified identity context."""
@@ -176,6 +188,7 @@ class IdentityService:
                 principal_id TEXT NOT NULL,
                 created_at REAL NOT NULL,
                 revoked_at REAL,
+                identity_version TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (channel, account_id)
             );
             CREATE INDEX IF NOT EXISTS idx_noryka_identity_principal
@@ -199,6 +212,16 @@ class IdentityService:
             );
             """
         )
+        link_columns = {
+            row["name"] for row in self._conn.execute(
+                "PRAGMA table_info(noryka_identity_links)"
+            )
+        }
+        if "identity_version" not in link_columns:
+            self._conn.execute(
+                "ALTER TABLE noryka_identity_links "
+                "ADD COLUMN identity_version TEXT NOT NULL DEFAULT ''"
+            )
 
     def _audit(self, event: str, *, channel: str | None = None,
                account_id: str | None = None, principal_id: str | None = None,
@@ -227,14 +250,17 @@ class IdentityService:
         if account_id in self.owners.get(channel, ()):
             return self._make_context(principal, channel, account_id, True, "owner_allowlist")
         row = self._conn.execute(
-            """SELECT principal_id FROM noryka_identity_links
+            """SELECT principal_id, identity_version FROM noryka_identity_links
                WHERE channel=? AND account_id=? AND revoked_at IS NULL""",
             (channel, account_id),
         ).fetchone()
         if row is None:
             self._audit("identity_denied", channel=channel, account_id=account_id)
             return None
-        return self._make_context(row["principal_id"], channel, account_id, False, "pairing")
+        return self._make_context(
+            row["principal_id"], channel, account_id, False, "pairing",
+            row["identity_version"],
+        )
 
     def require_identity(self, channel: str, account_id: str) -> IdentityContext:
         """Fail closed when an inbound channel account is not trusted or paired."""
@@ -314,13 +340,14 @@ class IdentityService:
             )
             self._conn.execute(
                 """INSERT INTO noryka_identity_links
-                   (channel, account_id, principal_id, created_at, revoked_at)
-                   VALUES (?, ?, ?, ?, NULL)
+                   (channel, account_id, principal_id, created_at, revoked_at, identity_version)
+                   VALUES (?, ?, ?, ?, NULL, ?)
                    ON CONFLICT(channel, account_id) DO UPDATE SET
                        principal_id=excluded.principal_id,
                        created_at=excluded.created_at,
-                       revoked_at=NULL""",
-                (channel, account_id, row["created_by"], now),
+                       revoked_at=NULL,
+                       identity_version=excluded.identity_version""",
+                (channel, account_id, row["created_by"], now, token_hash),
             )
             principal = row["created_by"]
             self._audit("identity_paired", channel=channel, account_id=account_id, principal_id=principal)
@@ -329,7 +356,9 @@ class IdentityService:
             if self._conn.in_transaction:
                 self._conn.execute("ROLLBACK")
             raise
-        return self._make_context(principal, channel, account_id, False, "pairing")
+        return self._make_context(
+            principal, channel, account_id, False, "pairing", token_hash
+        )
 
     @_synchronized
     def revoke_pairing_code(self, actor: IdentityContext, token: str) -> None:

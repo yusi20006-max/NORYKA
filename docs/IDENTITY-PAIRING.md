@@ -12,7 +12,8 @@ ID from that adapter and returns an immutable `IdentityContext` carrying a
 process-local HMAC proof. `require_identity` fails closed for unpaired accounts.
 Downstream services can verify that proof and re-check that the account is still
 active; unlinking an account or removing an owner from the allowlist invalidates
-previously issued contexts. A caller cannot create a trusted context merely by
+previously issued contexts. Each successful pairing has its own generation, so
+re-pairing the same account does not revive an older context. A caller cannot create a trusted context merely by
 instantiating the dataclass. No
 adapter exists in this phase; Telegram/Bale wiring belongs to Issue #8.
 
