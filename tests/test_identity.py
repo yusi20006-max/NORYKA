@@ -80,6 +80,13 @@ class IdentityServiceTests(unittest.TestCase):
         events = [event["event"] for event in self.service.audit_events()]
         self.assertIn("pairing_code_issuer_unauthorized", events)
 
+    def test_paired_context_is_invalidated_when_its_owner_is_removed(self):
+        code, _ = self.service.create_pairing_code(self.owner)
+        linked = self.service.claim_pairing_code(code, "bale", "linked-device")
+        self.service.owners = {}
+        self.assertFalse(self.service.verify_context(linked))
+        self.assertIsNone(self.service.resolve_identity("bale", "linked-device"))
+
     def test_owner_context_is_invalidated_when_owner_is_removed(self):
         self.assertTrue(self.service.verify_context(self.owner))
         self.service.owners = {}

@@ -110,6 +110,13 @@ class IdentityService:
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+    def _is_authorized_principal(self, principal_id: str) -> bool:
+        return any(
+            principal_id == self._principal_id(owner_channel, owner_account)
+            for owner_channel, owner_accounts in self.owners.items()
+            for owner_account in owner_accounts
+        )
+
     def _context_proof(self, principal_id: str, channel: str, account_id: str,
                        is_owner: bool, auth_method: str, identity_version: str = "") -> str:
         separator = chr(0)
@@ -151,7 +158,7 @@ class IdentityService:
                 return False
             identity_version = ""
         else:
-            if auth_method != "pairing":
+            if auth_method != "pairing" or not self._is_authorized_principal(principal_id):
                 return False
             row = self._conn.execute(
                 """SELECT identity_version FROM noryka_identity_links
@@ -254,7 +261,7 @@ class IdentityService:
                WHERE channel=? AND account_id=? AND revoked_at IS NULL""",
             (channel, account_id),
         ).fetchone()
-        if row is None:
+        if row is None or not self._is_authorized_principal(row["principal_id"]):
             self._audit("identity_denied", channel=channel, account_id=account_id)
             return None
         return self._make_context(
@@ -307,11 +314,7 @@ class IdentityService:
                 self._audit("pairing_code_rejected", channel=channel, account_id=account_id)
                 self._conn.execute("COMMIT")
                 raise PermissionError("invalid or expired pairing code")
-            issuer_is_authorized = any(
-                row["created_by"] == self._principal_id(owner_channel, owner_account)
-                for owner_channel, owner_accounts in self.owners.items()
-                for owner_account in owner_accounts
-            )
+            issuer_is_authorized = self._is_authorized_principal(row["created_by"])
             if not issuer_is_authorized:
                 self._conn.execute(
                     "UPDATE noryka_pairing_tokens SET revoked_at=? WHERE token_hash=?",
