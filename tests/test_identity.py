@@ -28,10 +28,12 @@ class IdentityServiceTests(unittest.TestCase):
         self.assertIsNone(self.service.resolve_identity("bale", "owner-100"))
 
     def test_non_owner_cannot_create_pairing_code(self):
+        forged = IdentityContext(
+            self.owner.principal_id, "telegram", "owner-100", True, "owner_allowlist"
+        )
         with self.assertRaises(PermissionError):
-            self.service.create_pairing_code(
-                IdentityContext("forged", "telegram", "attacker", True, "owner_allowlist")
-            )
+            self.service.create_pairing_code(forged)
+        self.assertFalse(self.service.verify_context(forged))
 
     def test_pairing_code_is_one_time_and_persists(self):
         code, expires = self.service.create_pairing_code(self.owner)
@@ -39,6 +41,16 @@ class IdentityServiceTests(unittest.TestCase):
         linked = self.service.claim_pairing_code(code, "telegram", "user-200")
         self.assertFalse(linked.is_owner)
         self.assertEqual(linked.auth_method, "pairing")
+        self.assertEqual(linked.principal_id, self.owner.principal_id)
+        conversation_a = self.service.resolve_conversation(linked, "group-9")
+        conversation_b = self.service.resolve_conversation(linked, "group-9")
+        self.assertEqual(conversation_a, conversation_b)
+        self.assertEqual(conversation_a.principal_id, self.owner.principal_id)
+        with self.assertRaises(PermissionError):
+            self.service.resolve_conversation(
+                IdentityContext("forged", "telegram", "user-200", False, "pairing"),
+                "group-9",
+            )
         self.assertEqual(
             self.service.resolve_identity("telegram", "user-200"), linked
         )

@@ -7,10 +7,11 @@ fields, and model/tool arguments are not identity evidence.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from threading import RLock
 from pathlib import Path
@@ -36,6 +37,16 @@ class IdentityContext:
     account_id: str
     is_owner: bool
     auth_method: str
+    proof: str = field(default="", repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class ConversationContext:
+    """Canonical conversation scope; its identifier is not an auth credential."""
+
+    conversation_id: str
+    principal_id: str
+    channel: str
 
 
 class IdentityService:
@@ -67,6 +78,7 @@ class IdentityService:
             for channel, accounts in (owners or {}).items()
         }
         self.pairing_ttl_seconds = pairing_ttl_seconds
+        self._context_key = secrets.token_bytes(32)
         self._clock = clock or time.time
         self._conn = sqlite3.connect(self.db_path, timeout=10, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -93,6 +105,35 @@ class IdentityService:
     @staticmethod
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _context_proof(self, principal_id: str, channel: str, account_id: str,
+                       is_owner: bool, auth_method: str) -> str:
+        separator = chr(0)
+        message = separator.join((principal_id, channel, account_id, str(is_owner), auth_method))
+        return hmac.new(self._context_key, message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _make_context(self, principal_id: str, channel: str, account_id: str,
+                      is_owner: bool, auth_method: str) -> IdentityContext:
+        proof = self._context_proof(principal_id, channel, account_id, is_owner, auth_method)
+        return IdentityContext(principal_id, channel, account_id, is_owner, auth_method, proof)
+
+    def verify_context(self, context: IdentityContext) -> bool:
+        if not isinstance(context, IdentityContext):
+            return False
+        expected = self._context_proof(
+            context.principal_id, context.channel, context.account_id,
+            context.is_owner, context.auth_method,
+        )
+        return bool(context.proof) and hmac.compare_digest(context.proof, expected)
+
+    def resolve_conversation(self, context: IdentityContext, channel_conversation_id: str) -> ConversationContext:
+        """Create a stable conversation scope only from a verified identity context."""
+        if not self.verify_context(context):
+            raise PermissionError("verified identity context required")
+        conversation = self._identifier(channel_conversation_id, "conversation_id")
+        raw = (context.channel + chr(0) + conversation).encode("utf-8")
+        identifier = "conversation:" + hashlib.sha256(raw).hexdigest()
+        return ConversationContext(identifier, context.principal_id, context.channel)
 
     def _init_schema(self) -> None:
         self._conn.executescript(
@@ -144,7 +185,7 @@ class IdentityService:
         account_id = self._identifier(account_id, "account_id")
         principal = self._principal_id(channel, account_id)
         if account_id in self.owners.get(channel, ()):
-            return IdentityContext(principal, channel, account_id, True, "owner_allowlist")
+            return self._make_context(principal, channel, account_id, True, "owner_allowlist")
         row = self._conn.execute(
             """SELECT principal_id FROM noryka_identity_links
                WHERE channel=? AND account_id=? AND revoked_at IS NULL""",
@@ -153,16 +194,12 @@ class IdentityService:
         if row is None:
             self._audit("identity_denied", channel=channel, account_id=account_id)
             return None
-        return IdentityContext(row["principal_id"], channel, account_id, False, "pairing")
+        return self._make_context(row["principal_id"], channel, account_id, False, "pairing")
 
     @_synchronized
     def create_pairing_code(self, actor: IdentityContext) -> tuple[str, float]:
         """Create a one-time pairing code; only a configured owner may issue it."""
-        if not isinstance(actor, IdentityContext) or not actor.is_owner:
-            raise PermissionError("only an authenticated owner may create pairing codes")
-        expected = self.owners.get(actor.channel, ())
-        if actor.account_id not in expected or actor.principal_id != self._principal_id(actor.channel, actor.account_id):
-            raise PermissionError("owner identity is not present in the deployment allowlist")
+        self._require_owner(actor)
         token = secrets.token_urlsafe(32)
         now = self._clock()
         expires = now + self.pairing_ttl_seconds
@@ -214,15 +251,16 @@ class IdentityService:
                 """INSERT INTO noryka_identity_links
                    (channel, account_id, principal_id, created_at)
                    VALUES (?, ?, ?, ?)""",
-                (channel, account_id, principal, now),
+                (channel, account_id, row["created_by"], now),
             )
+            principal = row["created_by"]
             self._audit("identity_paired", channel=channel, account_id=account_id, principal_id=principal)
             self._conn.execute("COMMIT")
         except Exception:
             if self._conn.in_transaction:
                 self._conn.execute("ROLLBACK")
             raise
-        return IdentityContext(principal, channel, account_id, False, "pairing")
+        return self._make_context(principal, channel, account_id, False, "pairing")
 
     @_synchronized
     def revoke_pairing_code(self, actor: IdentityContext, token: str) -> None:
@@ -257,6 +295,8 @@ class IdentityService:
     def _require_owner(self, actor: IdentityContext) -> None:
         if not isinstance(actor, IdentityContext) or not actor.is_owner:
             raise PermissionError("owner identity required")
+        if not self.verify_context(actor):
+            raise PermissionError("untrusted identity context")
         if actor.account_id not in self.owners.get(actor.channel, ()):
             raise PermissionError("owner identity is not present in the deployment allowlist")
         if actor.principal_id != self._principal_id(actor.channel, actor.account_id):

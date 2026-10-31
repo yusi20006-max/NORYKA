@@ -8,8 +8,10 @@ Telegram/Bale update. Display names, usernames, message text, forwarded
 metadata, model output, and tool arguments are never identity evidence.
 
 The identity service accepts the channel name and canonical platform account
-ID from that adapter and returns an immutable `IdentityContext`. No adapter
-exists in this phase; Telegram/Bale wiring belongs to Issue #8.
+ID from that adapter and returns an immutable `IdentityContext` carrying a
+process-local HMAC proof. Downstream services can verify that proof; a caller
+cannot create a trusted context merely by instantiating the dataclass. No
+adapter exists in this phase; Telegram/Bale wiring belongs to Issue #8.
 
 ## Owner bootstrap
 
@@ -32,9 +34,11 @@ Do not commit actual account IDs or other deployment secrets into the repo.
 
 An authenticated owner creates a short-lived random pairing code. Only a
 SHA-256 digest is persisted. The code is returned once, expires, and is
-atomically consumed by the first successful claim. A channel adapter may call
-`claim_pairing_code` only after it has independently verified the sender's
-platform account ID.
+atomically consumed by the first successful claim. The newly paired channel
+account is linked to the principal of the owner who issued the code, allowing
+that owner's Telegram and Bale accounts to share one principal. A channel
+adapter may call `claim_pairing_code` only after it has independently verified
+the sender's platform account ID.
 
 Pairing does not authorize privileged tools or side effects. It establishes
 only the channel-account-to-principal association. Tool policy and operation
@@ -43,7 +47,9 @@ approvals remain in Issue #15.
 ## Persistence and audit
 
 Identity links, pairing token hashes, and audit events use SQLite in the
-existing user data directory (outside the checkout). Revocation is retained
+existing user data directory (outside the checkout). Conversation scopes are
+derived deterministically from the verified channel identity and the platform
+conversation identifier; they are identifiers, not authorization credentials. Revocation is retained
 as a timestamp for auditability. Pairing attempts are recorded without
 persisting raw pairing codes.
 
