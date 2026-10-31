@@ -25,6 +25,8 @@ class IdentityServiceTests(unittest.TestCase):
     def test_owner_requires_explicit_allowlist(self):
         self.assertTrue(self.owner.is_owner)
         self.assertIsNone(self.service.resolve_identity("telegram", "first-sender"))
+        with self.assertRaises(PermissionError):
+            self.service.require_identity("telegram", "first-sender")
         self.assertIsNone(self.service.resolve_identity("bale", "owner-100"))
 
     def test_non_owner_cannot_create_pairing_code(self):
@@ -64,6 +66,13 @@ class IdentityServiceTests(unittest.TestCase):
             self.service.resolve_identity("telegram", "user-200"), linked
         )
 
+    def test_owner_can_revoke_unused_pairing_code(self):
+        code, _ = self.service.create_pairing_code(self.owner)
+        self.service.revoke_pairing_code(self.owner, code)
+        with self.assertRaises(PermissionError):
+            self.service.claim_pairing_code(code, "bale", "revoked-user")
+        self.assertIsNone(self.service.resolve_identity("bale", "revoked-user"))
+
     def test_pairing_code_expires(self):
         code, _ = self.service.create_pairing_code(self.owner)
         self.now[0] += 31
@@ -81,7 +90,8 @@ class IdentityServiceTests(unittest.TestCase):
 
     def test_revocation_unlinks_account(self):
         code, _ = self.service.create_pairing_code(self.owner)
-        self.service.claim_pairing_code(code, "bale", "user-300")
+        linked = self.service.claim_pairing_code(code, "bale", "user-300")
+        self.assertEqual(linked.principal_id, self.owner.principal_id)
         self.assertTrue(self.service.unlink_account(self.owner, "bale", "user-300"))
         self.assertIsNone(self.service.resolve_identity("bale", "user-300"))
         self.assertFalse(self.service.unlink_account(self.owner, "bale", "user-300"))

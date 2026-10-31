@@ -196,6 +196,13 @@ class IdentityService:
             return None
         return self._make_context(row["principal_id"], channel, account_id, False, "pairing")
 
+    def require_identity(self, channel: str, account_id: str) -> IdentityContext:
+        """Fail closed when an inbound channel account is not trusted or paired."""
+        context = self.resolve_identity(channel, account_id)
+        if context is None:
+            raise PermissionError("unpaired or unauthorized channel account")
+        return context
+
     @_synchronized
     def create_pairing_code(self, actor: IdentityContext) -> tuple[str, float]:
         """Create a one-time pairing code; only a configured owner may issue it."""

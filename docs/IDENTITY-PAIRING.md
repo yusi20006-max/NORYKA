@@ -9,7 +9,7 @@ metadata, model output, and tool arguments are never identity evidence.
 
 The identity service accepts the channel name and canonical platform account
 ID from that adapter and returns an immutable `IdentityContext` carrying a
-process-local HMAC proof. Downstream services can verify that proof; a caller
+process-local HMAC proof. `require_identity` fails closed for unpaired accounts. Downstream services can verify that proof; a caller
 cannot create a trusted context merely by instantiating the dataclass. No
 adapter exists in this phase; Telegram/Bale wiring belongs to Issue #8.
 
@@ -49,8 +49,8 @@ approvals remain in Issue #15.
 Identity links, pairing token hashes, and audit events use SQLite in the
 existing user data directory (outside the checkout). Conversation scopes are
 derived deterministically from the verified channel identity and the platform
-conversation identifier; they are identifiers, not authorization credentials. Revocation is retained
-as a timestamp for auditability. Pairing attempts are recorded without
+conversation identifier; they are identifiers, not authorization credentials.
+Revocation is retained as a timestamp for auditability. Pairing attempts are recorded without
 persisting raw pairing codes.
 
 ## Security limitations
