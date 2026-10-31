@@ -80,6 +80,13 @@ class IdentityServiceTests(unittest.TestCase):
         events = [event["event"] for event in self.service.audit_events()]
         self.assertIn("pairing_code_issuer_unauthorized", events)
 
+    def test_owner_context_is_invalidated_when_owner_is_removed(self):
+        self.assertTrue(self.service.verify_context(self.owner))
+        self.service.owners = {}
+        self.assertFalse(self.service.verify_context(self.owner))
+        with self.assertRaises(PermissionError):
+            self.service.create_pairing_code(self.owner)
+
     def test_owner_can_revoke_unused_pairing_code(self):
         code, _ = self.service.create_pairing_code(self.owner)
         self.service.revoke_pairing_code(self.owner, code)
@@ -107,6 +114,7 @@ class IdentityServiceTests(unittest.TestCase):
         linked = self.service.claim_pairing_code(code, "bale", "user-300")
         self.assertEqual(linked.principal_id, self.owner.principal_id)
         self.assertTrue(self.service.unlink_account(self.owner, "bale", "user-300"))
+        self.assertFalse(self.service.verify_context(linked))
         self.assertIsNone(self.service.resolve_identity("bale", "user-300"))
         self.assertFalse(self.service.unlink_account(self.owner, "bale", "user-300"))
         replacement_code, _ = self.service.create_pairing_code(self.owner)

@@ -117,14 +117,42 @@ class IdentityService:
         proof = self._context_proof(principal_id, channel, account_id, is_owner, auth_method)
         return IdentityContext(principal_id, channel, account_id, is_owner, auth_method, proof)
 
+    @_synchronized
     def verify_context(self, context: IdentityContext) -> bool:
+        """Verify context integrity and re-check that its identity is still active."""
         if not isinstance(context, IdentityContext):
             return False
+        if not isinstance(context.is_owner, bool):
+            return False
+        try:
+            principal_id = self._identifier(context.principal_id, "principal_id")
+            channel = self._identifier(context.channel, "channel")
+            account_id = self._identifier(context.account_id, "account_id")
+            auth_method = self._identifier(context.auth_method, "auth_method")
+        except ValueError:
+            return False
         expected = self._context_proof(
-            context.principal_id, context.channel, context.account_id,
-            context.is_owner, context.auth_method,
+            principal_id, channel, account_id, context.is_owner, auth_method,
         )
-        return bool(context.proof) and hmac.compare_digest(context.proof, expected)
+        if not isinstance(context.proof, str) or not context.proof:
+            return False
+        if not hmac.compare_digest(context.proof, expected):
+            return False
+        if context.is_owner:
+            return (
+                auth_method == "owner_allowlist"
+                and account_id in self.owners.get(channel, ())
+                and principal_id == self._principal_id(channel, account_id)
+            )
+        if auth_method != "pairing":
+            return False
+        row = self._conn.execute(
+            """SELECT 1 FROM noryka_identity_links
+               WHERE channel=? AND account_id=? AND principal_id=?
+                 AND revoked_at IS NULL""",
+            (channel, account_id, principal_id),
+        ).fetchone()
+        return row is not None
 
     def resolve_conversation(self, context: IdentityContext, channel_conversation_id: str) -> ConversationContext:
         """Create a stable conversation scope only from a verified identity context."""
