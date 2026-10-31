@@ -101,6 +101,29 @@ class IdentityServiceTests(unittest.TestCase):
             self.service.claim_pairing_code(code, "bale", "revoked-user")
         self.assertIsNone(self.service.resolve_identity("bale", "revoked-user"))
 
+    def test_allowlisted_owner_account_cannot_claim_another_owners_pairing_code(self):
+        self.service.owners = {
+            "telegram": frozenset({"owner-100", "owner-101"})
+        }
+        code, _ = self.service.create_pairing_code(self.owner)
+        with self.assertRaisesRegex(
+            PermissionError, "allowlisted owner accounts cannot claim pairing codes"
+        ):
+            self.service.claim_pairing_code(code, "telegram", "owner-101")
+
+        resolved_owner = self.service.resolve_identity("telegram", "owner-101")
+        self.assertTrue(resolved_owner.is_owner)
+        self.assertEqual(
+            resolved_owner.principal_id,
+            self.service._principal_id("telegram", "owner-101"),
+        )
+
+        # Rejection happens before token consumption; a genuine non-owner can
+        # still use the one-time code issued by owner-100.
+        linked = self.service.claim_pairing_code(code, "bale", "linked-user")
+        self.assertEqual(linked.principal_id, self.owner.principal_id)
+        self.assertTrue(self.service.verify_context(linked))
+
     def test_pairing_code_expires(self):
         code, _ = self.service.create_pairing_code(self.owner)
         self.now[0] += 31
