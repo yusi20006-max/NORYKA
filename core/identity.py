@@ -241,6 +241,24 @@ class IdentityService:
                 self._audit("pairing_code_rejected", channel=channel, account_id=account_id)
                 self._conn.execute("COMMIT")
                 raise PermissionError("invalid or expired pairing code")
+            issuer_is_authorized = any(
+                row["created_by"] == self._principal_id(owner_channel, owner_account)
+                for owner_channel, owner_accounts in self.owners.items()
+                for owner_account in owner_accounts
+            )
+            if not issuer_is_authorized:
+                self._conn.execute(
+                    "UPDATE noryka_pairing_tokens SET revoked_at=? WHERE token_hash=?",
+                    (now, token_hash),
+                )
+                self._audit(
+                    "pairing_code_issuer_unauthorized",
+                    channel=channel,
+                    account_id=account_id,
+                    principal_id=row["created_by"],
+                )
+                self._conn.execute("COMMIT")
+                raise PermissionError("pairing code issuer is no longer authorized")
             existing = self._conn.execute(
                 """SELECT principal_id FROM noryka_identity_links
                    WHERE channel=? AND account_id=? AND revoked_at IS NULL""",

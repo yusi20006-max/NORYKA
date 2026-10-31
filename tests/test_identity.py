@@ -66,6 +66,20 @@ class IdentityServiceTests(unittest.TestCase):
             self.service.resolve_identity("telegram", "user-200"), linked
         )
 
+    def test_pairing_code_is_rejected_if_issuer_is_removed_from_owner_allowlist(self):
+        code, _ = self.service.create_pairing_code(self.owner)
+        self.service.close()
+        self.service = IdentityService(
+            self.db, owners={}, clock=lambda: self.now[0]
+        )
+        with self.assertRaisesRegex(PermissionError, "issuer is no longer authorized"):
+            self.service.claim_pairing_code(code, "bale", "untrusted-after-owner-removal")
+        self.assertIsNone(
+            self.service.resolve_identity("bale", "untrusted-after-owner-removal")
+        )
+        events = [event["event"] for event in self.service.audit_events()]
+        self.assertIn("pairing_code_issuer_unauthorized", events)
+
     def test_owner_can_revoke_unused_pairing_code(self):
         code, _ = self.service.create_pairing_code(self.owner)
         self.service.revoke_pairing_code(self.owner, code)
