@@ -256,8 +256,12 @@ class IdentityService:
             )
             self._conn.execute(
                 """INSERT INTO noryka_identity_links
-                   (channel, account_id, principal_id, created_at)
-                   VALUES (?, ?, ?, ?)""",
+                   (channel, account_id, principal_id, created_at, revoked_at)
+                   VALUES (?, ?, ?, ?, NULL)
+                   ON CONFLICT(channel, account_id) DO UPDATE SET
+                       principal_id=excluded.principal_id,
+                       created_at=excluded.created_at,
+                       revoked_at=NULL""",
                 (channel, account_id, row["created_by"], now),
             )
             principal = row["created_by"]

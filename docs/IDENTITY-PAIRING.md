@@ -50,7 +50,7 @@ Identity links, pairing token hashes, and audit events use SQLite in the
 existing user data directory (outside the checkout). Conversation scopes are
 derived deterministically from the verified channel identity and the platform
 conversation identifier; they are identifiers, not authorization credentials.
-Revocation is retained as a timestamp for auditability. Pairing attempts are recorded without
+Revocation is retained as a timestamp for auditability; an explicitly re-paired account reactivates the existing link record. Pairing attempts are recorded without
 persisting raw pairing codes.
 
 ## Security limitations
