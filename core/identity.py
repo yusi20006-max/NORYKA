@@ -11,6 +11,7 @@ import hmac
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from threading import RLock
@@ -92,6 +93,27 @@ class IdentityService:
     @_synchronized
     def close(self) -> None:
         self._conn.close()
+
+    @contextmanager
+    def _transaction(self):
+        """Run one mutation (including its `_audit` write) in an atomic transaction.
+
+        Mirrors the explicit `BEGIN IMMEDIATE` / `COMMIT` pattern of
+        `claim_pairing_code`: the connection runs in autocommit mode
+        (`isolation_level=None`), so every statement would otherwise commit on
+        its own and could leave a mutation persisted without its audit event.
+        On any exception the transaction rolls back before the error surfaces;
+        audit events are then either fully written with their mutation, or not
+        written at all.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self._conn.execute("COMMIT")
+        except Exception:
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
+            raise
 
     @staticmethod
     def _identifier(value: str, field: str) -> str:
@@ -239,13 +261,23 @@ class IdentityService:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (event, channel, account_id, principal_id, self._clock(), details[:256]),
         )
+        # Retention prune: keep the newest AUDIT_RETENTION_LIMIT records.
+        # A primary-key cutoff avoids the previous O(table × window) NOT IN set
+        # scan. The window boundary is resolved by position (the
+        # AUDIT_RETENTION_LIMIT-th newest id via LIMIT/OFFSET), NOT as
+        # (max_id - limit): ids stay exact even if ids stop being contiguous
+        # (e.g. a future feature deleting rows from the middle of the table),
+        # so the newest-N guarantee never silently weakens. With fewer than
+        # AUDIT_RETENTION_LIMIT rows the OFFSET lookup returns no row and the
+        # DELETE keeps everything.
         self._conn.execute(
             """DELETE FROM noryka_identity_audit
-               WHERE id NOT IN (
+               WHERE id < (
                    SELECT id FROM noryka_identity_audit
-                   ORDER BY id DESC LIMIT ?
+                   ORDER BY id DESC
+                   LIMIT 1 OFFSET ?
                )""",
-            (self.AUDIT_RETENTION_LIMIT,),
+            (self.AUDIT_RETENTION_LIMIT - 1,),
         )
 
     @_synchronized
@@ -283,13 +315,14 @@ class IdentityService:
         token = secrets.token_urlsafe(32)
         now = self._clock()
         expires = now + self.pairing_ttl_seconds
-        self._conn.execute(
-            """INSERT INTO noryka_pairing_tokens
-               (token_hash, created_by, created_at, expires_at)
-               VALUES (?, ?, ?, ?)""",
-            (self._token_hash(token), actor.principal_id, now, expires),
-        )
-        self._audit("pairing_code_created", principal_id=actor.principal_id)
+        with self._transaction():
+            self._conn.execute(
+                """INSERT INTO noryka_pairing_tokens
+                   (token_hash, created_by, created_at, expires_at)
+                   VALUES (?, ?, ?, ?)""",
+                (self._token_hash(token), actor.principal_id, now, expires),
+            )
+            self._audit("pairing_code_created", principal_id=actor.principal_id)
         return token, expires
 
     @_synchronized
@@ -371,12 +404,13 @@ class IdentityService:
     def revoke_pairing_code(self, actor: IdentityContext, token: str) -> None:
         """Revoke an unused code. Owner authority is revalidated at call time."""
         self._require_owner(actor)
-        self._conn.execute(
-            """UPDATE noryka_pairing_tokens SET revoked_at=?
-               WHERE token_hash=? AND consumed_at IS NULL AND revoked_at IS NULL""",
-            (self._clock(), self._token_hash(token)),
-        )
-        self._audit("pairing_code_revoked", principal_id=actor.principal_id)
+        with self._transaction():
+            self._conn.execute(
+                """UPDATE noryka_pairing_tokens SET revoked_at=?
+                   WHERE token_hash=? AND consumed_at IS NULL AND revoked_at IS NULL""",
+                (self._clock(), self._token_hash(token)),
+            )
+            self._audit("pairing_code_revoked", principal_id=actor.principal_id)
 
     @_synchronized
     def unlink_account(self, actor: IdentityContext, channel: str, account_id: str) -> bool:
@@ -385,16 +419,17 @@ class IdentityService:
         channel = self._identifier(channel, "channel")
         account_id = self._identifier(account_id, "account_id")
         now = self._clock()
-        cursor = self._conn.execute(
-            """UPDATE noryka_identity_links SET revoked_at=?
-               WHERE channel=? AND account_id=? AND revoked_at IS NULL""",
-            (now, channel, account_id),
-        )
-        changed = cursor.rowcount > 0
-        self._audit(
-            "identity_unlinked" if changed else "identity_unlink_noop",
-            channel=channel, account_id=account_id, principal_id=actor.principal_id,
-        )
+        with self._transaction():
+            cursor = self._conn.execute(
+                """UPDATE noryka_identity_links SET revoked_at=?
+                   WHERE channel=? AND account_id=? AND revoked_at IS NULL""",
+                (now, channel, account_id),
+            )
+            changed = cursor.rowcount > 0
+            self._audit(
+                "identity_unlinked" if changed else "identity_unlink_noop",
+                channel=channel, account_id=account_id, principal_id=actor.principal_id,
+            )
         return changed
 
     def _require_owner(self, actor: IdentityContext) -> None:
