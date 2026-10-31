@@ -131,6 +131,81 @@ class IdentityServiceTests(unittest.TestCase):
             self.service.claim_pairing_code(code, "telegram", "late-user")
         self.assertIsNone(self.service.resolve_identity("telegram", "late-user"))
 
+    def test_pairing_context_is_rejected_when_its_account_becomes_allowlisted(self):
+        code, _ = self.service.create_pairing_code(self.owner)
+        paired = self.service.claim_pairing_code(code, "telegram", "promoted-user")
+        self.assertEqual(paired.principal_id, self.owner.principal_id)
+        # 1. The existing context is accepted under the original state.
+        self.assertTrue(self.service.verify_context(paired))
+        # 2. The account is added to the owner allowlist afterwards.
+        self.service.owners = {"telegram": frozenset({"owner-100", "promoted-user"})}
+        authoritative = self.service.resolve_identity("telegram", "promoted-user")
+        self.assertTrue(authoritative.is_owner)
+        self.assertEqual(
+            authoritative.principal_id,
+            self.service._principal_id("telegram", "promoted-user"),
+        )
+        # 3. The stale pre-transition pairing context is now rejected
+        #    server-side (verification path), before any adapter use.
+        self.assertFalse(self.service.verify_context(paired))
+        with self.assertRaises(PermissionError):
+            self.service.resolve_conversation(paired, "group-9")
+        with self.assertRaises(PermissionError):
+            self.service.create_pairing_code(paired)
+        # 4. No silent ownership transfer and no unrelated record changes:
+        #    the promoted account resolves to its OWN owner principal (not the
+        #    stale paired principal), and owner-100 keeps its principal.
+        self.assertNotEqual(authoritative.principal_id, paired.principal_id)
+        owner = self.service.resolve_identity("telegram", "owner-100")
+        self.assertTrue(owner.is_owner)
+        self.assertEqual(owner.principal_id, self.owner.principal_id)
+        # 5. A newly issued, legitimate context under current policy verifies.
+        fresh = self.service.resolve_identity("telegram", "promoted-user")
+        self.assertTrue(self.service.verify_context(fresh))
+        self.assertTrue(fresh.is_owner)
+        # 6. Unaffected paired accounts keep their existing behavior.
+        code2, _ = self.service.create_pairing_code(self.owner)
+        unaffected = self.service.claim_pairing_code(code2, "bale", "device-2")
+        self.assertTrue(self.service.verify_context(unaffected))
+        self.assertEqual(
+            self.service.resolve_identity("bale", "device-2").principal_id,
+            self.owner.principal_id,
+        )
+
+    def test_verify_context_rejects_malformed_context_proofs_safely(self):
+        code, _ = self.service.create_pairing_code(self.owner)
+        paired = self.service.claim_pairing_code(code, "telegram", "user-240")
+        # 1. A valid ASCII proof is accepted.
+        self.assertTrue(self.service.verify_context(paired))
+        # 2-6. Malformed proofs must be rejected through the normal
+        #       invalid-proof path (False), never by raising TypeError or any
+        #       unexpected exception — including non-ASCII input, wrong types,
+        #       empty values, wrong lengths, and invalid representations.
+        malformed_proofs = (
+            "π" * 64,                     # non-ASCII, same length
+            "a" * 60 + "π" * 4,           # non-ASCII suffix
+            b"x" * 64,                    # wrong type: bytes
+            12345,                        # wrong type: int
+            None,                         # wrong type: None
+            "",                           # empty
+            "a" * 63,                     # malformed length
+            "a" * 65,                     # malformed length
+            "z" * 64,                     # invalid hex representation
+            "g" * 63 + "0",               # invalid hex representation
+            "A" * 64,                     # well-formed but incorrect proof
+        )
+        for index, malformed in enumerate(malformed_proofs):
+            with self.subTest(index=index, kind=type(malformed).__name__):
+                forged = IdentityContext(
+                    paired.principal_id, paired.channel, paired.account_id,
+                    False, "pairing", proof=malformed,
+                )
+                self.assertFalse(self.service.verify_context(forged))
+                with self.assertRaises(PermissionError):
+                    self.service.resolve_conversation(forged, "group-9")
+        # The still-valid context remains verifiable after malformed attempts.
+        self.assertTrue(self.service.verify_context(paired))
+
     def test_pairing_code_cannot_be_reused_for_an_already_linked_account(self):
         code, _ = self.service.create_pairing_code(self.owner)
         first = self.service.claim_pairing_code(code, "telegram", "user-200")

@@ -29,6 +29,26 @@ def _synchronized(method):
     return wrapper
 
 
+_PROOF_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_valid_proof_format(proof: object) -> bool:
+    """Validate a context proof's representation before any cryptographic use.
+
+    A context proof is an HMAC-SHA256 hexdigest: exactly 64 ASCII hex
+    characters. Restricting to hex digits keeps non-ASCII input from reaching
+    ``hmac.compare_digest`` (which raises ``TypeError`` for non-ASCII str) and
+    rejects malformed representations deterministically instead of failing
+    with an unexpected exception. Valid-format proofs still go through the
+    constant-time comparison.
+    """
+    return (
+        isinstance(proof, str)
+        and len(proof) == 64
+        and all(ch in _PROOF_HEX_DIGITS for ch in proof)
+    )
+
+
 @dataclass(frozen=True)
 class IdentityContext:
     """Trusted identity resolved by the channel boundary, never by model input."""
@@ -171,6 +191,8 @@ class IdentityService:
             return False
         if not isinstance(context.proof, str) or not context.proof:
             return False
+        if not _is_valid_proof_format(context.proof):
+            return False
         if context.is_owner:
             if (
                 auth_method != "owner_allowlist"
@@ -181,6 +203,16 @@ class IdentityService:
             identity_version = ""
         else:
             if auth_method != "pairing" or not self._is_authorized_principal(principal_id):
+                return False
+            # An account that has become allowlisted authenticates only
+            # through the owner path from then on. A pairing context issued
+            # before that allowlist transition must stop verifying, otherwise
+            # the same channel account would carry two valid identities (its
+            # own owner principal and the stale paired principal). Reject it
+            # server-side here; linked-account records are left untouched
+            # (no destructive unlink), so the owner can explicitly pair or
+            # remove accounts later.
+            if account_id in self.owners.get(channel, ()):
                 return False
             row = self._conn.execute(
                 """SELECT identity_version FROM noryka_identity_links
