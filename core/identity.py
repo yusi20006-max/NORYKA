@@ -299,6 +299,10 @@ class IdentityService:
         account_id = self._identifier(account_id, "account_id")
         if not isinstance(token, str) or not token or len(token) > 256:
             raise PermissionError("invalid or expired pairing code")
+        # Allowlisted accounts already have an authoritative owner identity.
+        # They must never be rebound to another owner's principal via pairing.
+        if account_id in self.owners.get(channel, ()):
+            raise PermissionError("allowlisted owner accounts cannot claim pairing codes")
         token_hash = self._token_hash(token)
         now = self._clock()
         principal = self._principal_id(channel, account_id)
