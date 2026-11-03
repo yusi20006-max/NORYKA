@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - main
+    types: [ready_for_review, reopened]
   workflow_dispatch:
 
 permissions:
@@ -124,15 +125,11 @@ jobs:
 
   termux-install:
     name: Native Termux/Bionic install smoke test
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Enable ARM64 emulation for the pinned Termux image
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-      - name: Install NORYKA in a clean Termux container and smoke-test it
+      - name: Install NORYKA in a clean ARM64 Termux container and smoke-test it
         shell: bash
         run: |
           set -euo pipefail
