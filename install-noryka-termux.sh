@@ -35,7 +35,11 @@ echo "[4/4] Preparing isolated build backend in the virtual environment..."
 python -m pip install --upgrade "setuptools>=68.0.0" wheel setuptools-rust
 if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
     if [ -z "${ANDROID_API_LEVEL:-}" ]; then
-        ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null || true)"
+        if command -v getprop >/dev/null 2>&1; then
+            if ! ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null)"; then
+                ANDROID_API_LEVEL=""
+            fi
+        fi
     fi
     case "${ANDROID_API_LEVEL:-}" in
         ''|*[!0-9]*) ANDROID_API_LEVEL=24 ;;
