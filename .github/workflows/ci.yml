@@ -12,7 +12,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: write
 
 concurrency:
@@ -27,25 +26,6 @@ jobs:
       changed: ${{ steps.resolve.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
-      - name: Cancel superseded runs for this hardening branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          branch="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$branch" == release/* ]]; then
-            for status in in_progress queued; do
-              mapfile -t run_ids < <(
-                gh run list --repo "$GITHUB_REPOSITORY" --branch "$branch" \
-                  --status "$status" --json databaseId --jq '.[].databaseId'
-              )
-              for run_id in "${run_ids[@]}"; do
-                [[ -n "$run_id" && "$run_id" != "$GITHUB_RUN_ID" ]] || continue
-                gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY" || true
-              done
-            done
-          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
