@@ -1,0 +1,15 @@
+name: bale
+kind: platform
+version: 1.0.0
+description: Bale Messenger (پیام‌رسان بله) platform adapter for Noryka Gateway
+requires_env:
+  - name: BALE_BOT_TOKEN
+    description: Bot token from @BotFather on Bale Messenger (tapi.bale.ai)
+    password: true
+optional_env:
+  - name: BALE_ALLOWED_USERS
+    description: Comma-separated Bale user IDs allowed to interact with Noryka
+  - name: BALE_HOME_CHANNEL
+    description: Default Bale chat_id for cron and proactive notifications
+  - name: BALE_API_BASE_URL
+    description: Custom Bale Bot API base URL (default https://tapi.bale.ai/bot)

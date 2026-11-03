@@ -1,0 +1,7 @@
+name: web-xai
+version: 1.0.0
+description: "xAI Web Search — search the web via Grok's agentic web_search tool (Responses API). Requires xAI Grok OAuth (via `noryka auth`) or XAI_API_KEY (https://x.ai)."
+author: yusi20006-max
+kind: backend
+provides_web_providers:
+  - xai

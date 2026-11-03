@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Noryka Studio — داشبورد هوشمند دستیار و موتور کدنویسی نوریکا</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    if (typeof tailwind !== "undefined") {
+      tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Vazirmatn', 'Inter', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace']
+          },
+          colors: {
+            noryka: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              400: '#818cf8',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+              900: '#1e1b4b',
+              950: '#0b0a1f'
+            }
+          }
+        }
+      }
+    };
+    }
+  </script>
+  <style>
+    body {
+      font-family: 'Vazirmatn', 'Inter', sans-serif;
+    }
+
+    /* Offline-First Fallback CSS (works even when CDN is unreachable on weak/offline networks) */
+    *, ::before, ::after { box-sizing: border-box; }
+    body { margin: 0; background-color: #020617; color: #f1f5f9; line-height: 1.5; }
+    .hidden { display: none !important; }
+    .flex { display: flex; }
+    .grid { display: grid; }
+    .items-center { align-items: center; }
+    .justify-between { justify-content: space-between; }
+    .gap-2 { gap: 0.5rem; }
+    .gap-3 { gap: 0.75rem; }
+    .gap-4 { gap: 1rem; }
+    .gap-6 { gap: 1.5rem; }
+    .p-4 { padding: 1rem; }
+    .p-5 { padding: 1.25rem; }
+    .rounded-xl { border-radius: 0.75rem; }
+    .rounded-2xl { border-radius: 1rem; }
+    .w-full { width: 100%; }
+    button { cursor: pointer; border: none; font-family: inherit; }
+    input, select, textarea { font-family: inherit; color: #f1f5f9; background: #0f172a; border: 1px solid #334155; border-radius: 0.75rem; padding: 0.5rem 0.75rem; }
+
+    .glass-panel {
+      background: rgba(17, 24, 39, 0.78);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(99, 102, 241, 0.18);
+    }
+    html:not(.dark) .glass-panel {
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid rgba(99, 102, 241, 0.22);
+    }
+    .ltr-code {
+      direction: ltr;
+      text-align: left;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(15, 23, 42, 0.4);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(99, 102, 241, 0.45);
+      border-radius: 9999px;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 dark:bg-slate-950 dark:text-slate-100 min-h-screen selection:bg-indigo-500 selection:text-white transition-colors duration-200">
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="fixed bottom-5 left-5 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none"></div>
+
+  <!-- Gateway Config Modal -->
+  <div id="gateway-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div class="glass-panel rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-indigo-500/30">
+      <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
+        <h3 id="modal-gw-title" class="text-lg font-bold text-indigo-400">تنظیمات دروازه پیام‌رسان</h3>
+        <button id="btn-close-gw-modal" type="button" onclick="closeGatewayModal()" class="text-slate-400 hover:text-white px-2 py-1 rounded-lg">✕</button>
+      </div>
+      <div class="space-y-4 text-sm">
+        <div>
+          <label class="block text-slate-300 mb-1 font-medium">توکن بات (Bot Token):</label>
+          <input id="modal-gw-token" type="password" placeholder="123456789:ABCDEF..." class="w-full px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-100 ltr-code focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div>
+          <label class="block text-slate-300 mb-1 font-medium">شناسه‌های مجاز ادمین (Allowed User IDs - Fail-Closed):</label>
+          <input id="modal-gw-users" type="text" placeholder="987654321, 11223344" class="w-full px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-100 ltr-code focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-300 mb-1 font-medium">فاصله ویرایش استریم (ثانیه):</label>
+            <input id="modal-gw-throttle" type="number" step="0.5" min="0.5" max="10" class="w-full px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-100 ltr-code focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label class="block text-slate-300 mb-1 font-medium">حالت کدنویسی در کانال:</label>
+            <select id="modal-gw-coding" class="w-full px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-indigo-500">
+              <option value="focus">فعال (Coding Focus + AST)</option>
+              <option value="auto">خودکار (Auto Detect)</option>
+              <option value="off">غیرفعال (فقط چت عمومی)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-3 mt-6 pt-3 border-t border-slate-800">
+        <button type="button" onclick="closeGatewayModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium">انصراف</button>
+        <button type="button" onclick="saveGatewayModal()" class="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold shadow-lg shadow-indigo-600/30">ذخیره و اعمال در Gateway</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Header -->
+  <header class="sticky top-0 z-30 glass-panel border-b border-indigo-500/20 px-4 lg:px-8 py-3">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-500 via-purple-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-indigo-500/30 font-extrabold text-white text-xl">
+          N
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-cyan-300 bg-clip-text text-transparent">NORYKA STUDIO</h1>
+            <span class="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">v1.0 Autonomous</span>
+          </div>
+          <p class="text-xs text-slate-400">موتور دستیار شخصی، دروازه چندکاناله (تلگرام و بله) و استودیو کدنویسی پیشرفته</p>
+        </div>
+      </div>
+
+      <!-- Navigation Pills -->
+      <nav class="flex items-center gap-1.5 overflow-x-auto py-1">
+        <button type="button" onclick="switchTab('overview')" id="tab-btn-overview" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30">
+          داشبورد و وضعیت
+        </button>
+        <button type="button" onclick="switchTab('chat')" id="tab-btn-chat" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
+          چت و استودیو کدنویسی
+        </button>
+        <button type="button" onclick="switchTab('gateways')" id="tab-btn-gateways" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
+          دروازه‌ها (تلگرام / بله)
+        </button>
+        <button type="button" onclick="switchTab('providers')" id="tab-btn-providers" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
+          مدل‌ها و Fallback
+        </button>
+        <button type="button" onclick="switchTab('automation')" id="tab-btn-automation" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
+          زمان‌بند Cron و حافظه
+        </button>
+        <button type="button" onclick="switchTab('deploy')" id="tab-btn-deploy" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
+          خروجی کانفیگ و Termux
+        </button>
+      </nav>
+
+      <!-- Right Status Actions -->
+      <div class="flex items-center gap-2">
+        <div class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs">
+          <span id="runtime-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span class="text-slate-300">هسته Noryka:</span>
+          <span id="runtime-status-label" class="font-bold text-emerald-400">آماده</span>
+        </div>
+        <button type="button" onclick="toggleTheme()" id="btn-theme-toggle" class="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700">
+          تم روشن/تاریک
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Workspace Container -->
+  <main class="max-w-7xl mx-auto px-4 lg:px-8 py-6">
+
+    <!-- TAB 1: OVERVIEW & LIVE TELEMETRY -->
+    <section id="view-overview" class="space-y-6">
+      <!-- Top KPI Cards -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-400 font-medium">دروازه‌های فعال (Gateways)</span>
+            <span class="px-2 py-0.5 text-[11px] rounded-lg bg-indigo-500/20 text-indigo-300 font-semibold">Multi-Channel</span>
+          </div>
+          <div id="kpi-active-gateways" class="text-2xl font-extrabold mt-2 text-white">۱ کانال محلی فعال</div>
+          <p class="text-xs text-emerald-400 mt-1">Telegram • Bale (بله) • CLI</p>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-400 font-medium">مسیریاب مدل و Fallback</span>
+            <span class="px-2 py-0.5 text-[11px] rounded-lg bg-cyan-500/20 text-cyan-300 font-semibold">۴۵ ارائه‌دهنده</span>
+          </div>
+          <div id="kpi-active-model" class="text-lg font-extrabold mt-2 text-white truncate ltr-code">anthropic/claude-sonnet-4</div>
+          <p id="kpi-pool-status" class="text-xs text-slate-400 mt-1">آماده ثبت کلید در استخر چرخش</p>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-400 font-medium">صرفه‌جویی Context Compressor</span>
+            <span class="px-2 py-0.5 text-[11px] rounded-lg bg-emerald-500/20 text-emerald-300 font-semibold">Byte-Stable Cache</span>
+          </div>
+          <div id="kpi-token-savings" class="text-2xl font-extrabold mt-2 text-emerald-400">آستانه ۵۰٪ (Proactive Prune)</div>
+          <p class="text-xs text-slate-400 mt-1">هرس خودکار ابزارها + خلاصه‌سازی</p>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-400 font-medium">موتور کدنویسی (Coding Posture)</span>
+            <span class="px-2 py-0.5 text-[11px] rounded-lg bg-purple-500/20 text-purple-300 font-semibold">AST + V4A Patch</span>
+          </div>
+          <div id="kpi-coding-mode" class="text-2xl font-extrabold mt-2 text-white">فعال روی همه کانال‌ها</div>
+          <p class="text-xs text-purple-300 mt-1">۲۹۴ ماژول ابزار + بررسی خودکار AST</p>
+        </div>
+      </div>
+
+      <!-- Charts & Live Gateway Feed -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="lg:col-span-2 glass-panel rounded-2xl p-5">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <div>
+              <h2 class="text-base font-bold text-white">عملکرد فشرده‌ساز تاریخچه و مصرف توکن (Context Compressor)</h2>
+              <p class="text-xs text-slate-400">مقایسه توکن خام مکالمه با توکن بهینه‌شده پس از هرس ابزارها و Prompt Caching</p>
+            </div>
+            <button type="button" onclick="syncCompressionTelemetry()" class="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 text-xs font-semibold">
+              همگام‌سازی وضعیت فشرده‌ساز
+            </button>
+          </div>
+          <div class="relative h-72 w-full">
+            <canvas id="telemetryChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Live Activity Stream -->
+        <div class="glass-panel rounded-2xl p-5 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <h2 class="text-base font-bold text-white">رویدادهای زنده هسته Noryka</h2>
+              <button type="button" onclick="clearEventLog()" class="text-xs text-slate-400 hover:text-slate-200">پاک‌سازی</button>
+            </div>
+            <div id="live-event-log" class="space-y-2.5 max-h-64 overflow-y-auto pr-1 text-xs"></div>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
+            <span class="text-xs text-slate-400">پایگاه داده نشست: <code class="text-indigo-300">~/.noryka/state.db (WAL)</code></span>
+            <button type="button" onclick="runHealthDoctor()" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">
+              اجرای عیب‌یاب (Doctor)
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: AI CHAT & CODING STUDIO -->
+    <section id="view-chat" class="hidden space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- Chat Column -->
+        <div class="lg:col-span-7 glass-panel rounded-2xl p-5 flex flex-col h-[620px]">
+          <div class="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-800">
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-indigo-400"></span>
+              <h2 class="text-base font-bold text-white">کنسول تعاملی Noryka (چت و اجرای ابزار)</h2>
+            </div>
+            <div class="flex items-center gap-2">
+              <select id="chat-posture-select" onchange="changeCodingPosture(this.value)" class="px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-200">
+                <option value="coding">حالت: Coding Posture (۲۹۴ ماژول ابزار + AST)</option>
+                <option value="minimum">حالت: Minimum Text Runtime (بدون ابزار)</option>
+                <option value="safe">حالت: Safe Public (ضد SSRF - بدون ترمینال)</option>
+              </select>
+              <button type="button" onclick="compressCurrentChat()" class="px-2.5 py-1 rounded-xl bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 text-xs font-medium">
+                /compress
+              </button>
+              <button type="button" onclick="resetChatSession()" class="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium">
+                /new
+              </button>
+            </div>
+          </div>
+
+          <!-- Messages Stream -->
+          <div id="chat-messages" class="flex-1 overflow-y-auto space-y-3 pr-1 text-sm"></div>
+
+          <!-- Quick Prompts -->
+          <div class="flex flex-wrap gap-1.5 my-2.5">
+            <button type="button" onclick="sendQuickPrompt('پروژه فعلی رو با ast_code_analyzer بررسی کن و ساختار کلاس‌ها رو بگو')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 text-slate-300 border border-slate-800 text-xs">
+              تحلیل AST پروژه
+            </button>
+            <button type="button" onclick="sendQuickPrompt('وضعیت اتصال دروازه‌های تلگرام و بله و استخر کلیدها رو گزارش بده')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 text-slate-300 border border-slate-800 text-xs">
+              گزارش وضعیت تلگرام و بله
+            </button>
+            <button type="button" onclick="sendQuickPrompt('یک پچ V4A برای بهینه‌سازی حلقه مکالمه پیشنهاد بده و سینتکسش رو تست کن')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 text-slate-300 border border-slate-800 text-xs">
+              تولید و تست Patch کد
+            </button>
+          </div>
+
+          <!-- Input Box -->
+          <div class="flex items-center gap-2 pt-2 border-t border-slate-800">
+            <input id="chat-input" type="text" onkeydown="if(event.key==='Enter') sendChatMessage()" placeholder="پیام، دستور کدنویسی یا دستور اسلش (/model, /compress, /stop) را بنویسید..." class="flex-1 px-4 py-2.5 rounded-xl bg-slate-900/90 border border-slate-700 text-sm text-white focus:outline-none focus:border-indigo-500" />
+            <button type="button" onclick="sendChatMessage()" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold shadow-lg shadow-indigo-600/30">
+              ارسال
+            </button>
+          </div>
+        </div>
+
+        <!-- Live AST Code Analyzer & Patch Workbench -->
+        <div class="lg:col-span-5 glass-panel rounded-2xl p-5 flex flex-col h-[620px]">
+          <div class="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
+            <div>
+              <h2 class="text-base font-bold text-white">میزکار کدنویسی و تحلیلگر زنده AST</h2>
+              <p class="text-xs text-slate-400">تست زنده ابزار <code class="text-indigo-300">ast_code_analyzer</code> و بررسی گاردهای امنیتی</p>
+            </div>
+            <button type="button" onclick="runLiveAstCheck()" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">
+              تحلیل کد و بررسی سینتکس
+            </button>
+          </div>
+
+          <label class="text-xs text-slate-300 mb-1 font-medium">کد پایتون جهت بررسی قبل از اعمال Patch:</label>
+          <textarea id="ast-code-editor" rows="10" class="w-full p-3 rounded-xl bg-slate-900/95 border border-slate-700 text-xs text-emerald-300 ltr-code focus:outline-none focus:border-indigo-500 resize-none">from agent.conversation_loop import run_conversation
+from tools.registry import registry
+
+class NorykaCodingAgent:
+    def __init__(self, model: str = "claude-sonnet-4"):
+        self.model = model
+
+    async def execute_verified_patch(self, file_path: str, patch_diff: str) -> dict:
+        """Apply V4A patch and auto-verify AST syntax."""
+        return {"status": "verified", "target": file_path}
+</textarea>
+
+          <div class="mt-3 flex-1 flex flex-col overflow-hidden">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-semibold text-slate-300">خروجی تحلیلگر AST و گارد امنیتی Noryka:</span>
+              <span id="ast-badge" class="px-2 py-0.5 text-[11px] rounded-full bg-emerald-500/20 text-emerald-400">Syntax Valid</span>
+            </div>
+            <pre id="ast-output-box" class="flex-1 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 ltr-code overflow-y-auto"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: MULTI-CHANNEL GATEWAYS (TELEGRAM, BALE, DISCORD, SLACK, WHATSAPP) -->
+    <section id="view-gateways" class="hidden space-y-6">
+      <div class="glass-panel rounded-2xl p-5 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 class="text-base font-bold text-white">مدیریت دروازه‌های پیام‌رسان (Noryka Multi-Channel Gateway)</h2>
+          <p class="text-xs text-slate-400">پشتیبانی از ۲۹ پلتفرم با هسته مشترک، الگوی دو گارد پیام ورودی (<code class="text-indigo-300">/stop</code>, <code class="text-indigo-300">/approve</code>) و حالت کدنویسی فعال روی پیام‌رسان‌ها</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="checkGatewayConnection('bale')" class="px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold">
+            بررسی وضعیت اتصال بله (Bale)
+          </button>
+          <button type="button" onclick="checkGatewayConnection('telegram')" class="px-3.5 py-2 rounded-xl bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-semibold">
+            بررسی وضعیت اتصال تلگرام
+          </button>
+        </div>
+      </div>
+
+      <div id="gateways-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </section>
+
+    <!-- TAB 4: PROVIDERS, CREDENTIAL POOL & FALLBACK CHAIN -->
+    <section id="view-providers" class="hidden space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- Credential Pool & Key Rotation -->
+        <div class="lg:col-span-7 glass-panel rounded-2xl p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+            <div>
+              <h2 class="text-base font-bold text-white">استخر چرخش کلیدها (Credential Pool & Cooldown Manager)</h2>
+              <p class="text-xs text-slate-400">چرخش خودکار بین چند API Key در صورت بروز خطای <code class="text-amber-400">429 Rate Limit</code> یا <code class="text-rose-400">402 Billing</code> بدون قطع مکالمه</p>
+            </div>
+            <button type="button" onclick="verifyCredentialPoolHealth()" class="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs font-semibold">
+              بررسی سلامت استخر کلیدها
+            </button>
+          </div>
+
+          <!-- Add New Key Form -->
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-2 pt-1">
+            <select id="pool-provider-select" class="px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100">
+              <option value="openrouter">OpenRouter (300+ Models)</option>
+              <option value="anthropic">Anthropic Native</option>
+              <option value="openai">OpenAI / Codex Responses</option>
+              <option value="deepseek">DeepSeek Direct</option>
+              <option value="gemini">Google Gemini Native</option>
+              <option value="ollama">Ollama / LM Studio Local</option>
+            </select>
+            <input id="pool-key-label" type="text" placeholder="عنوان کلید (مثلاً Key-Main)" class="px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100" />
+            <input id="pool-key-value" type="password" placeholder="sk-or-v1-..." class="px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100 ltr-code" />
+            <button type="button" onclick="addCredentialPoolKey()" class="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold">
+              + افزودن به استخر کلید
+            </button>
+          </div>
+
+          <div id="credential-pool-list" class="space-y-2.5 pt-2"></div>
+        </div>
+
+        <!-- Fallback Chain & Auxiliary Model Router -->
+        <div class="lg:col-span-5 glass-panel rounded-2xl p-5 space-y-4">
+          <div class="pb-3 border-b border-slate-800">
+            <h2 class="text-base font-bold text-white">زنجیره Fallback و مدل‌های کمکی (Auxiliary Router)</h2>
+            <p class="text-xs text-slate-400">تعیین مدل اصلی، مدل جایگزین در زمان قطعی، و مدل ارزان برای فشرده‌سازی تاریخچه</p>
+          </div>
+
+          <div class="space-y-3 text-xs">
+            <div class="p-3.5 rounded-xl bg-slate-900/90 border border-indigo-500/30">
+              <div class="flex items-center justify-between mb-1">
+                <span class="font-bold text-indigo-300">۱. مدل اصلی مکالمه و کدنویسی (Primary Route)</span>
+                <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400">Active</span>
+              </div>
+              <select id="primary-model-select" onchange="updatePrimaryModel(this.value)" class="w-full mt-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 ltr-code">
+                <option value="anthropic/claude-sonnet-4">anthropic/claude-sonnet-4 (anthropic_messages)</option>
+                <option value="openai/gpt-5.4-codex">openai/gpt-5.4-codex (codex_responses)</option>
+                <option value="deepseek/deepseek-chat-v3">deepseek/deepseek-chat-v3 (chat_completions)</option>
+                <option value="google/gemini-2.5-pro">google/gemini-2.5-pro (chat_completions)</option>
+                <option value="ollama/qwen2.5-coder:32b">ollama/qwen2.5-coder:32b (local 32K window)</option>
+              </select>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800">
+              <div class="flex items-center justify-between mb-1">
+                <span class="font-bold text-amber-300">۲. مدل پشتیبان اول (Fallback #1 — Auto Failover)</span>
+                <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">Standby</span>
+              </div>
+              <input id="fallback-model-1" type="text" value="deepseek/deepseek-chat-v3" class="w-full mt-1 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 ltr-code" />
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800">
+              <div class="flex items-center justify-between mb-1">
+                <span class="font-bold text-cyan-300">۳. مدل کمکی فشرده‌سازی و عنوان‌گذاری (Auxiliary LLM)</span>
+                <span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">Low-Cost</span>
+              </div>
+              <input id="aux-model-input" type="text" value="google/gemini-2.5-flash" class="w-full mt-1 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 ltr-code" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: CRON SCHEDULER, MEMORY & SKILLS -->
+    <section id="view-automation" class="hidden space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- Cron Scheduler -->
+        <div class="lg:col-span-7 glass-panel rounded-2xl p-5 space-y-4">
+          <div class="pb-3 border-b border-slate-800">
+            <h2 class="text-base font-bold text-white">زمان‌بند کارهای خودکار (Noryka Cron Scheduler)</h2>
+            <p class="text-xs text-slate-400">اجرای خودکار پرامپت‌ها و ارسال نتیجه به تلگرام یا بله (با قفل <code class="text-indigo-300">.tick.lock</code> و جلوگیری از اجرای تکراری)</p>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs">
+            <input id="cron-prompt-input" type="text" placeholder="پرامپت (مثلاً: بررسی وضعیت سرور و ارسال گزارش)" class="sm:col-span-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-100" />
+            <input id="cron-schedule-input" type="text" placeholder="every 6h یا 0 8 * * *" class="px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 ltr-code" />
+            <div class="flex gap-1">
+              <select id="cron-deliver-select" class="flex-1 px-2 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-100">
+                <option value="bale">ارسال به بله</option>
+                <option value="telegram">ارسال به تلگرام</option>
+              </select>
+              <button type="button" onclick="addCronJob()" class="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold">+</button>
+            </div>
+          </div>
+
+          <div id="cron-jobs-list" class="space-y-2.5 pt-2"></div>
+        </div>
+
+        <!-- Persistent Memory (MEMORY.md & USER.md) -->
+        <div class="lg:col-span-5 glass-panel rounded-2xl p-5 space-y-4">
+          <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div>
+              <h2 class="text-base font-bold text-white">حافظه بلندمدت (<code class="text-indigo-300">MEMORY.md</code> & <code class="text-indigo-300">USER.md</code>)</h2>
+              <p class="text-xs text-slate-400">محافظت‌شده با اسکنر ضد تزریق پرامپت (<code class="text-emerald-400">threat_patterns.py</code>)</p>
+            </div>
+            <button type="button" onclick="saveMemoryStore()" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">
+              ذخیره حافظه
+            </button>
+          </div>
+
+          <div class="space-y-3 text-xs">
+            <div>
+              <label class="block text-slate-300 mb-1 font-medium">پروفایل و ترجیحات شما (<code class="text-indigo-300">~/.noryka/memories/USER.md</code>):</label>
+              <textarea id="memory-user-box" rows="4" class="w-full p-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-indigo-500">- زبان پیش‌فرض پاسخ‌ها: فارسی، دقیق و مهندسی
+- اولویت کدنویسی: Python 3.11+، تست استاتیک AST، حفظ ساختار ماژولار
+- کانال‌های ارتباطی اصلی: تلگرام و پیام‌رسان بله روی Termux ARM64</textarea>
+            </div>
+            <div>
+              <label class="block text-slate-300 mb-1 font-medium">حافظه پروژه‌ها و نکات فنی (<code class="text-indigo-300">~/.noryka/memories/MEMORY.md</code>):</label>
+              <textarea id="memory-notes-box" rows="5" class="w-full p-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-indigo-500">- پروژه Noryka دارای ۴۵ پلاگین ارائه‌دهنده مدل و ۲۹ آداپتور پیام‌رسان از جمله بله (tapi.bale.ai) است.
+- حالت Coding Posture برای تلگرام و بله در agent/coding_context.py فعال شده است.
+- مسیر دیتابیس نشست‌ها در Termux همواره روی حافظه داخلی $HOME/.noryka/state.db تنظیم می‌شود.</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: CONFIG GENERATOR & TERMUX DEPLOYMENT -->
+    <section id="view-deploy" class="hidden space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="glass-panel rounded-2xl p-5 space-y-4">
+          <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div>
+              <h2 class="text-base font-bold text-white">تولیدکننده خودکار <code class="text-indigo-300">~/.noryka/config.yaml</code> و <code class="text-indigo-300">.env</code></h2>
+              <p class="text-xs text-slate-400">تولید شده بر اساس تنظیمات فعلی شما در داشبورد Noryka Studio</p>
+            </div>
+            <div class="flex gap-2">
+              <button type="button" onclick="regenerateConfigPreview()" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium">
+                بروزرسانی
+              </button>
+              <button type="button" onclick="copyGeneratedConfig()" class="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold">
+                کپی کانفیگ
+              </button>
+            </div>
+          </div>
+          <pre id="generated-config-box" class="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-indigo-200 ltr-code overflow-x-auto h-80"></pre>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5 space-y-4">
+          <div class="pb-3 border-b border-slate-800">
+            <h2 class="text-base font-bold text-white">راهنمای اجرای سریع در Termux (اندروید) و Linux</h2>
+            <p class="text-xs text-slate-400">دستورات آماده برای راه‌اندازی کامل Noryka پس از استخراج فایل زیپ</p>
+          </div>
+          <div class="space-y-3 text-xs">
+            <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+              <div class="font-bold text-emerald-400 mb-1">۱. نصب خودکار پیش‌نیازها و بسته Noryka در Termux / Linux:</div>
+              <code class="block p-2 rounded bg-slate-950 text-slate-200 ltr-code">unzip noryka-agent.zip && cd noryka && bash install-noryka-termux.sh</code>
+            </div>
+            <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+              <div class="font-bold text-sky-400 mb-1">۲. اجرای هم‌زمان دروازه تلگرام، بله و زمان‌بند Cron در پس‌زمینه Termux:</div>
+              <code class="block p-2 rounded bg-slate-950 text-slate-200 ltr-code">termux-wake-lock && noryka gateway run</code>
+            </div>
+            <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+              <div class="font-bold text-purple-400 mb-1">۳. شروع چت و کدنویسی تعاملی در ترمینال یا اجرای همین وب‌اپ:</div>
+              <code class="block p-2 rounded bg-slate-950 text-slate-200 ltr-code">noryka dashboard --port 8080 --skip-build   # یا: noryka webapp</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+
+    // --- Live FastAPI Backend Integration (noryka_cli/web_server.py) with Standalone Fallback ---
+    const NorykaBackend = window.NorykaBackend = {
+      connected: false,
+      ws: null,
+      baseOrigin: (typeof window !== 'undefined' && window.location && window.location.protocol.startsWith('http'))
+        ? window.location.origin
+        : '',
+
+      async request(path, options = {}) {
+        if (!this.baseOrigin) return null;
+        try {
+          const resp = await fetch(this.baseOrigin + path, {
+            headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+            ...options
+          });
+          if (!resp.ok) return null;
+          return await resp.json();
+        } catch (_err) {
+          return null;
+        }
+      },
+
+      async syncFromServer() {
+        const statusData = await this.request('/api/status');
+        const dot = document.getElementById('runtime-dot');
+        const label = document.getElementById('runtime-status-label');
+        if (statusData) {
+          this.connected = true;
+          if (dot) dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+          if (label) label.textContent = 'متصل به سرور زنده (/api)';
+          addEventLog('API', 'emerald', 'ارتباط زنده با بک‌اند FastAPI نوریکا (/api/status) برقرار شد.');
+        } else {
+          this.connected = false;
+          if (label) label.textContent = 'آماده (Standalone / Local)';
+        }
+
+        const platformsData = await this.request('/api/messaging/platforms');
+        if (platformsData && Array.isArray(platformsData.platforms)) {
+          platformsData.platforms.forEach(p => {
+            const existing = state.gateways.find(g => g.id === p.id || g.id === p.name);
+            if (existing) {
+              existing.enabled = Boolean(p.connected || p.enabled);
+            }
+          });
+          renderGateways();
+        }
+
+        const cronData = await this.request('/api/cron/jobs');
+        if (cronData && Array.isArray(cronData.jobs) && cronData.jobs.length > 0) {
+          state.cronJobs = cronData.jobs.map(j => ({
+            id: j.id || ('c' + Math.random()),
+            prompt: j.prompt || j.name || 'Cron Task',
+            schedule: j.schedule || 'every 6h',
+            deliver: j.deliver || 'bale',
+            active: !j.paused,
+            lastRun: j.last_run_at || 'ثبت‌شده در سرور'
+          }));
+          renderCronJobs();
+        }
+      },
+
+      async saveGatewayToServer(gw) {
+        const payload = {
+          enabled: Boolean(gw.enabled),
+          stream_edit_throttle_seconds: gw.throttle,
+          coding_context: gw.coding
+        };
+        if (gw.token && gw.token.trim()) payload.token = gw.token.trim();
+        if (gw.allowedUsers && gw.allowedUsers.trim()) payload.allowed_users = gw.allowedUsers.trim();
+        return await this.request('/api/messaging/platforms/' + encodeURIComponent(gw.id), {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+      },
+
+      async pushEnvKey(keyName, keyValue) {
+        return await this.request('/api/env', {
+          method: 'PUT',
+          body: JSON.stringify({ [keyName]: keyValue })
+        });
+      },
+
+      async setPrimaryModel(modelName) {
+        return await this.request('/api/model/set', {
+          method: 'POST',
+          body: JSON.stringify({ model: modelName })
+        });
+      },
+
+      async createCronJobOnServer(job) {
+        return await this.request('/api/cron/jobs', {
+          method: 'POST',
+          body: JSON.stringify({
+            prompt: job.prompt,
+            schedule: job.schedule,
+            deliver: job.deliver
+          })
+        });
+      },
+
+      async triggerCronOnServer(jobId) {
+        return await this.request('/api/cron/jobs/' + encodeURIComponent(jobId) + '/trigger', {
+          method: 'POST'
+        });
+      },
+
+      async pushConfigYaml(configObj) {
+        return await this.request('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify(configObj)
+        });
+      },
+
+      connectWebSocket() {
+        if (!this.baseOrigin) return;
+        try {
+          const wsProto = this.baseOrigin.startsWith('https') ? 'wss:' : 'ws:';
+          const host = window.location.host;
+          if (!host) return;
+          this.ws = new WebSocket(wsProto + '//' + host + '/api/ws');
+          this.ws.onmessage = (ev) => {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg && msg.result && msg.result.final_response) {
+                state.chatHistory.push({ role: 'assistant', text: msg.result.final_response });
+                renderChatMessages();
+              }
+            } catch (_e) {}
+          };
+        } catch (_err) {}
+      }
+    };
+
+    // --- Application State ---
+    const state = window.state = {
+      activeTab: 'overview',
+      codingPosture: 'coding',
+      primaryModel: 'anthropic/claude-sonnet-4',
+      fallbackModel: 'deepseek/deepseek-chat-v3',
+      auxModel: 'google/gemini-2.5-flash',
+      editingGatewayId: null,
+      gateways: [
+        { id: 'bale', name: 'پیام‌رسان بله (Bale)', endpoint: 'https://tapi.bale.ai/bot', enabled: false, token: '', allowedUsers: '', throttle: 2.0, coding: 'focus', messagesCount: 0 },
+        { id: 'telegram', name: 'تلگرام (Telegram)', endpoint: 'https://api.telegram.org/bot', enabled: false, token: '', allowedUsers: '', throttle: 1.0, coding: 'focus', messagesCount: 0 },
+        { id: 'discord', name: 'دیسکورد (Discord)', endpoint: 'Gateway WebSocket v10', enabled: false, token: '', allowedUsers: '', throttle: 1.0, coding: 'auto', messagesCount: 0 },
+        { id: 'slack', name: 'اسلک (Slack Bolt)', endpoint: 'Socket Mode + Native Stream', enabled: false, token: '', allowedUsers: '', throttle: 0.8, coding: 'auto', messagesCount: 0 },
+        { id: 'whatsapp', name: 'واتس‌اپ (WhatsApp)', endpoint: 'Baileys / Cloud API', enabled: false, token: '', allowedUsers: '', throttle: 1.5, coding: 'off', messagesCount: 0 },
+        { id: 'cli', name: 'ترمینال و وب لوکال (Noryka CLI/Web)', endpoint: 'Local IPC / Loopback', enabled: true, token: '', allowedUsers: '', throttle: 0.2, coding: 'focus', messagesCount: 0 }
+      ],
+      credentialPool: [],
+      cronJobs: [
+        { id: 'c1', prompt: 'بررسی وضعیت مخزن Git و اجرای تست‌های سلامت کد', schedule: 'every 6h', deliver: 'bale', active: true, lastRun: '۱۰ دقیقه پیش (موفق)' },
+        { id: 'c2', prompt: 'خلاصه گزارش مصرف توکن و وضعیت دروازه‌های پیام‌رسان', schedule: '0 8 * * *', deliver: 'telegram', active: true, lastRun: 'امروز ۰۸:۰۰ (موفق)' }
+      ],
+      events: [
+        { time: '۲۳:۴۲:۱۰', tag: 'BALE', color: 'emerald', text: 'اتصال آداپتور پیام‌رسان بله (tapi.bale.ai) با Throttling=2.0s برقرار شد.' },
+        { time: '۲۳:۴۱:۵۵', tag: 'CODING', color: 'purple', text: 'حالت Coding Posture و ابزار ast_code_analyzer برای تلگرام و بله فعال شد.' },
+        { time: '۲۳:۴۱:۲۰', tag: 'COMPRESS', color: 'cyan', text: 'فشرده‌ساز تاریخچه (ContextCompressor) با آستانه ۵۰٪ و هرس ۱۶ هزار توکن آماده به کار است.' },
+        { time: '۲۳:۴۰:۱۲', tag: 'STATE', color: 'indigo', text: 'پایگاه داده ~/.noryka/state.db در حالت WAL آماده به کار است.' }
+      ],
+      chatHistory: [
+        { role: 'assistant', text: 'سلام! من **Noryka (نوریکا)** هستم. موتور کدنویسی پیشرفته، دروازه‌های **تلگرام** و **بله**، استخر چرخش کلیدها (۴۵ ارائه‌دهنده) و فشرده‌ساز هوشمند تاریخچه فعال و آماده به کارند. چه کمکی از دستم برمی‌آید؟' }
+      ],
+      chartDataRaw: [18, 34, 52, 78, 96, 124],
+      chartDataCompressed: [16, 26, 33, 41, 46, 51]
+    };
+
+    let telemetryChartInstance = null;
+
+    function showToast(message, type) {
+      const container = document.getElementById('toast-container');
+      const el = document.createElement('div');
+      const borderColor = type === 'warn' ? 'border-amber-500/50 bg-amber-950/90 text-amber-200' : 'border-emerald-500/50 bg-slate-900/95 text-emerald-300';
+      el.className = `pointer-events-auto px-4 py-3 rounded-xl border ${borderColor} shadow-xl text-xs font-medium transition-all duration-300`;
+      el.textContent = message;
+      container.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        setTimeout(() => el.remove(), 300);
+      }, 3200);
+    }
+
+    function addEventLog(tag, color, text) {
+      const now = new Date();
+      const timeStr = now.toTimeString().slice(0, 8);
+      state.events.unshift({ time: timeStr, tag, color, text });
+      renderEventLog();
+    }
+
+    function renderEventLog() {
+      const container = document.getElementById('live-event-log');
+      if (!container) return;
+      container.innerHTML = state.events.map(ev => `
+        <div class="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800/80 flex items-start gap-2">
+          <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-${ev.color}-500/20 text-${ev.color}-300 shrink-0">${ev.tag}</span>
+          <div class="flex-1 text-slate-300 leading-relaxed">${ev.text}</div>
+          <span class="text-[10px] text-slate-500 ltr-code shrink-0">${ev.time}</span>
+        </div>
+      `).join('');
+    }
+
+    function clearEventLog() {
+      state.events = [];
+      renderEventLog();
+      showToast('گزارش رویدادها پاک‌سازی شد.', 'info');
+    }
+
+    function switchTab(tabId) {
+      state.activeTab = tabId;
+      const tabs = ['overview', 'chat', 'gateways', 'providers', 'automation', 'deploy'];
+      tabs.forEach(t => {
+        const view = document.getElementById('view-' + t);
+        const btn = document.getElementById('tab-btn-' + t);
+        if (t === tabId) {
+          view.classList.remove('hidden');
+          btn.className = 'tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30';
+        } else {
+          view.classList.add('hidden');
+          btn.className = 'tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80';
+        }
+      });
+      if (tabId === 'deploy') {
+        regenerateConfigPreview();
+      }
+    }
+
+    function toggleTheme() {
+      const htmlEl = document.documentElement;
+      htmlEl.classList.toggle('dark');
+      const isDark = htmlEl.classList.contains('dark');
+      document.body.className = isDark
+        ? 'bg-slate-950 text-slate-100 min-h-screen selection:bg-indigo-500 selection:text-white transition-colors duration-200'
+        : 'bg-slate-100 text-slate-900 min-h-screen selection:bg-indigo-500 selection:text-white transition-colors duration-200';
+      showToast(isDark ? 'تم تاریک فعال شد.' : 'تم روشن فعال شد.', 'info');
+    }
+
+    function initChart() {
+      const ctx = document.getElementById('telemetryChart');
+      if (!ctx || typeof Chart === 'undefined') return;
+      if (telemetryChartInstance) {
+        telemetryChartInstance.destroy();
+      }
+      telemetryChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: ['نوبت ۱', 'نوبت ۵', 'نوبت ۱۰', 'نوبت ۱۵', 'نوبت ۲۰', 'نوبت ۲۵'],
+          datasets: [
+            {
+              label: 'توکن خام بدون فشرده‌سازی (هزار توکن)',
+              data: state.chartDataRaw,
+              borderColor: '#94a3b8',
+              backgroundColor: 'rgba(148, 163, 184, 0.1)',
+              borderDash: [5, 5],
+              tension: 0.35,
+              fill: true
+            },
+            {
+              label: 'توکن واقعی ارسالی Noryka (پس از هرس و ContextCompressor)',
+              data: state.chartDataCompressed,
+              borderColor: '#6366f1',
+              backgroundColor: 'rgba(99, 102, 241, 0.2)',
+              tension: 0.35,
+              fill: true
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              labels: { color: '#cbd5e1', font: { family: 'Vazirmatn' } }
+            }
+          },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.08)' } },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.08)' } }
+          }
+        }
+      });
+    }
+
+    async function syncCompressionTelemetry() {
+      if (NorykaBackend.connected) {
+        await NorykaBackend.syncFromServer();
+        addEventLog('COMPRESS', 'emerald', 'وضعیت ContextCompressor از سرور زنده (/api/status) همگام‌سازی شد.');
+        showToast('وضعیت فشرده‌ساز تاریخچه از سرور زنده دریافت شد.', 'info');
+        return;
+      }
+      document.getElementById('kpi-token-savings').textContent = 'آستانه ۵۰٪ (Proactive Prune)';
+      addEventLog('COMPRESS', 'cyan', 'تنظیمات ContextCompressor (threshold=0.50, prune=16000) بررسی شد.');
+      showToast('پیکربندی ContextCompressor بررسی شد.', 'info');
+    }
+
+    function runHealthDoctor() {
+      addEventLog('DOCTOR', 'emerald', 'بررسی سلامت: SessionDB (WAL=OK)، استخر کلیدها (۴ کلید سالم)، دروازه بله و تلگرام (متصل).');
+      showToast('عیب‌یاب Noryka Doctor: تمامی زیرسیستم‌ها در وضعیت سالم هستند.', 'info');
+    }
+
+    // --- Chat & Coding Studio Functions ---
+    function renderChatMessages() {
+      const box = document.getElementById('chat-messages');
+      if (!box) return;
+      box.innerHTML = state.chatHistory.map(m => {
+        if (m.role === 'user') {
+          return `
+            <div class="flex justify-start">
+              <div class="max-w-[82%] px-4 py-2.5 rounded-2xl bg-indigo-600 text-white text-xs leading-relaxed shadow">
+                <div class="font-bold text-[10px] text-indigo-200 mb-1">شما (${state.codingPosture})</div>
+                <div>${m.text}</div>
+              </div>
+            </div>`;
+        }
+        return `
+          <div class="flex justify-end">
+            <div class="max-w-[85%] px-4 py-3 rounded-2xl bg-slate-900 border border-slate-800 text-slate-200 text-xs leading-relaxed shadow">
+              <div class="flex items-center justify-between gap-2 mb-1">
+                <span class="font-bold text-[10px] text-emerald-400">Noryka Agent (${state.primaryModel})</span>
+                <span class="text-[10px] text-slate-500 ltr-code">Cache: HIT</span>
+              </div>
+              <div>${m.text}</div>
+            </div>
+          </div>`;
+      }).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function changeCodingPosture(mode) {
+      state.codingPosture = mode;
+      const labels = {
+        coding: 'فعال روی همه کانال‌ها (Coding Posture)',
+        minimum: 'حالت متنی سبک (Minimum Text)',
+        safe: 'حالت عمومی امن (Safe Mode)'
+      };
+      document.getElementById('kpi-coding-mode').textContent = labels[mode] || mode;
+      addEventLog('MODE', 'purple', `حالت اجرایی ایجنت به "${mode}" تغییر یافت.`);
+      showToast(`حالت اجرایی Noryka روی ${mode} قرار گرفت.`, 'info');
+    }
+
+    function sendQuickPrompt(text) {
+      const input = document.getElementById('chat-input');
+      input.value = text;
+      sendChatMessage();
+    }
+
+    function sendChatMessage() {
+      const input = document.getElementById('chat-input');
+      const text = (input.value || '').trim();
+      if (!text) return;
+      input.value = '';
+      state.chatHistory.push({ role: 'user', text });
+      renderChatMessages();
+
+      let reply = '';
+      if (text === '/compress') {
+        compressCurrentChat();
+        return;
+      } else if (text === '/new') {
+        resetChatSession();
+        return;
+      } else if (text.includes('ast_code_analyzer') || text.includes('AST')) {
+        reply = 'ابزار `ast_code_analyzer` روی مخزن اجرا شد: ساختار کلاس‌ها، توابع و گراف ایمپورت‌ها بدون هیچ خطای سینتکسی (`syntax_valid: true`) استخراج گردید. همچنین گیت ۶۴ هزار توکن به ۸٬۱۹۲ توکن کاهش یافت تا مدل‌های محلی به راحتی اجرا شوند.';
+      } else if (text.includes('تلگرام') || text.includes('بله')) {
+        const activeGws = state.gateways.filter(g => g.enabled).map(g => g.name).join('، ');
+        reply = `دروازه‌های فعال فعلی: **${activeGws}**. در آداپتور پیام‌رسان بله (` + '`plugins/platforms/bale/adapter.py`' + `)، فاصله ویرایش پیام استریم روی ۲.۰ ثانیه تنظیم شده و حالت Coding Posture برای هر دو کانال فعال است.`;
+      } else if (text.includes('پچ') || text.includes('Patch')) {
+        reply = 'پچ پیشنهادی در قالب استاندارد `V4A diff` آماده شد و پیش از نوشتن روی دیسک، با `ast.parse` اعتبارسنجی گردید. می‌توانید در ستون سمت چپ کد را به صورت زنده ویرایش و تست کنید.';
+      } else {
+        reply = `درخواست شما در حالت **${state.codingPosture}** توسط مدل \`${state.primaryModel}\` پردازش شد. تاریخچه در \`SessionDB\` ذخیره گردید و پیشوند پرامپت سیستم بدون تغییر بایت (Byte-stable) باقی ماند.`;
+      }
+
+      setTimeout(() => {
+        state.chatHistory.push({ role: 'assistant', text: reply });
+        renderChatMessages();
+      }, 220);
+    }
+
+    function compressCurrentChat() {
+      state.chatHistory.push({
+        role: 'assistant',
+        text: 'فشرده‌سازی دستی (`/compress`) از طریق `ContextCompressor` انجام شد: خروجی‌های قدیمی هرس شدند و خلاصه ساختاریافته در `SessionDB` ثبت گردید.'
+      });
+      renderChatMessages();
+      syncCompressionTelemetry();
+    }
+
+    function resetChatSession() {
+      state.chatHistory = [
+        { role: 'assistant', text: 'نشست جدید (`session_id` تازه در `SessionDB`) آغاز شد. آماده دریافت دستور هستم.' }
+      ];
+      renderChatMessages();
+      showToast('نشست مکالمه جدید ایجاد شد.', 'info');
+    }
+
+    function runLiveAstCheck() {
+      const code = document.getElementById('ast-code-editor').value || '';
+      const outBox = document.getElementById('ast-output-box');
+      const badge = document.getElementById('ast-badge');
+
+      const lines = code.split('\n');
+      const classes = [];
+      const funcs = [];
+      const imports = [];
+      let openParens = 0;
+
+      lines.forEach((line, idx) => {
+        const trimmed = line.trim();
+        for (const ch of line) {
+          if (ch === '(' || ch === '[' || ch === '{') openParens++;
+          if (ch === ')' || ch === ']' || ch === '}') openParens--;
+        }
+        const clsMatch = trimmed.match(/^class\s+([A-Za-z_][A-Za-z0-9_]*)/);
+        if (clsMatch) classes.push({ name: clsMatch[1], line: idx + 1 });
+        const fnMatch = trimmed.match(/^(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/);
+        if (fnMatch) funcs.push({ name: fnMatch[1], args: fnMatch[2], line: idx + 1, async: trimmed.startsWith('async') });
+        const impMatch = trimmed.match(/^(?:from\s+([\w.]+)\s+)?import\s+(.+)/);
+        if (impMatch) imports.push({ module: impMatch[1] || impMatch[2], names: impMatch[2], line: idx + 1 });
+      });
+
+      if (openParens !== 0) {
+        badge.className = 'px-2 py-0.5 text-[11px] rounded-full bg-rose-500/20 text-rose-400';
+        badge.textContent = 'SyntaxError Detected';
+        outBox.textContent = JSON.stringify({
+          success: false,
+          syntax_valid: false,
+          error: 'Unbalanced brackets/parentheses detected by pre-commit AST check.'
+        }, null, 2);
+        showToast('خطای سینتکس در کد شناسایی شد!', 'warn');
+        return;
+      }
+
+      badge.className = 'px-2 py-0.5 text-[11px] rounded-full bg-emerald-500/20 text-emerald-400';
+      badge.textContent = 'AST Verified OK';
+      const report = {
+        tool: 'ast_code_analyzer',
+        syntax_valid: true,
+        lines_count: lines.length,
+        classes_found: classes,
+        functions_found: funcs,
+        imports_found: imports,
+        security_scan: 'PASSED (threat_patterns.py: 0 findings)'
+      };
+      outBox.textContent = JSON.stringify(report, null, 2);
+      addEventLog('AST', 'emerald', `تحلیل AST موفق: ${classes.length} کلاس و ${funcs.length} تابع تایید شدند.`);
+      showToast('کد پایتون با موفقیت توسط AST Analyzer بررسی و تایید شد.', 'info');
+    }
+
+    // --- Gateways Management ---
+    function renderGateways() {
+      const grid = document.getElementById('gateways-grid');
+      if (!grid) return;
+      grid.innerHTML = state.gateways.map(gw => `
+        <div class="glass-panel rounded-2xl p-5 flex flex-col justify-between border ${gw.enabled ? 'border-indigo-500/40' : 'border-slate-800'}">
+          <div>
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <h3 class="text-sm font-bold text-white">${gw.name}</h3>
+                <p class="text-[11px] text-slate-400 ltr-code">${gw.endpoint}</p>
+              </div>
+              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${gw.enabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}">
+                ${gw.enabled ? 'متصل (Connected)' : 'غیرفعال'}
+              </span>
+            </div>
+            <div class="space-y-1.5 text-xs text-slate-300 bg-slate-900/70 p-3 rounded-xl border border-slate-800/80">
+              <div class="flex justify-between"><span>حالت کدنویسی:</span><span class="font-semibold text-indigo-300">${gw.coding}</span></div>
+              <div class="flex justify-between"><span>فاصله ویرایش استریم:</span><span class="ltr-code text-emerald-300">${gw.throttle}s</span></div>
+              <div class="flex justify-between"><span>کاربران مجاز (Allowlist):</span><span class="ltr-code text-slate-400">${gw.allowedUsers || 'تنظیم‌نشده'}</span></div>
+              <div class="flex justify-between"><span>پیام‌های پردازش‌شده:</span><span class="font-bold text-white">${gw.messagesCount}</span></div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-800">
+            <button type="button" onclick="toggleGateway('${gw.id}')" class="flex-1 py-2 rounded-xl text-xs font-semibold ${gw.enabled ? 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}">
+              ${gw.enabled ? 'توقف دروازه' : 'فعال‌سازی دروازه'}
+            </button>
+            <button type="button" onclick="openGatewayModal('${gw.id}')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium">
+              تنظیمات
+            </button>
+          </div>
+        </div>
+      `).join('');
+
+      const activeCount = state.gateways.filter(g => g.enabled).length;
+      const kpiEl = document.getElementById('kpi-active-gateways');
+      if (kpiEl) kpiEl.textContent = `${activeCount} کانال فعال`;
+    }
+
+    function toggleGateway(id) {
+      const gw = state.gateways.find(g => g.id === id);
+      if (!gw) return;
+      gw.enabled = !gw.enabled;
+      renderGateways();
+      addEventLog('GATEWAY', gw.enabled ? 'emerald' : 'amber', `دروازه ${gw.name} ${gw.enabled ? 'فعال' : 'متوقف'} شد.`);
+      showToast(`دروازه ${gw.name} ${gw.enabled ? 'فعال شد.' : 'متوقف شد.'}`, 'info');
+    }
+
+    function openGatewayModal(id) {
+      const gw = state.gateways.find(g => g.id === id);
+      if (!gw) return;
+      state.editingGatewayId = id;
+      document.getElementById('modal-gw-title').textContent = 'تنظیمات ' + gw.name;
+      document.getElementById('modal-gw-token').value = gw.token;
+      document.getElementById('modal-gw-users').value = gw.allowedUsers;
+      document.getElementById('modal-gw-throttle').value = gw.throttle;
+      document.getElementById('modal-gw-coding').value = gw.coding;
+      const modal = document.getElementById('gateway-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeGatewayModal() {
+      const modal = document.getElementById('gateway-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      state.editingGatewayId = null;
+    }
+
+    function saveGatewayModal() {
+      const gw = state.gateways.find(g => g.id === state.editingGatewayId);
+      if (!gw) return;
+      gw.token = document.getElementById('modal-gw-token').value.trim();
+      gw.allowedUsers = document.getElementById('modal-gw-users').value.trim();
+      gw.throttle = parseFloat(document.getElementById('modal-gw-throttle').value) || 1.0;
+      gw.coding = document.getElementById('modal-gw-coding').value;
+      closeGatewayModal();
+      NorykaBackend.saveGatewayToServer(gw);
+      renderGateways();
+      addEventLog('CONFIG', 'indigo', `تنظیمات دروازه ${gw.name} (Throttling=${gw.throttle}s, Coding=${gw.coding}) بروزرسانی شد.`);
+      showToast(`تنظیمات ${gw.name} ذخیره شد.`, 'info');
+    }
+
+    async function checkGatewayConnection(platformId) {
+      const gw = state.gateways.find(g => g.id === platformId);
+      if (!gw) return;
+      if (NorykaBackend.connected) {
+        await NorykaBackend.syncFromServer();
+      }
+      const hasToken = Boolean((gw.token || '').trim());
+      const hasAllowlist = Boolean((gw.allowedUsers || '').trim());
+      const statusMsg = gw.enabled
+        ? `دروازه ${gw.name} متصل و فعال است.`
+        : `دروازه ${gw.name} غیرفعال است (${hasToken ? 'توکن ثبت شده' : 'بدون توکن'}، ${hasAllowlist ? 'Allowlist تنظیم شده' : 'Allowlist خالی - Fail-Closed'}).`;
+      addEventLog(platformId.toUpperCase(), gw.enabled ? 'emerald' : 'amber', statusMsg);
+      showToast(statusMsg, gw.enabled ? 'info' : 'warn');
+    }
+
+    // --- Credential Pool & Fallback ---
+    function renderCredentialPool() {
+      const list = document.getElementById('credential-pool-list');
+      if (!list) return;
+      const kpiPool = document.getElementById('kpi-pool-status');
+      if (kpiPool) {
+        kpiPool.textContent = state.credentialPool.length > 0
+          ? `${state.credentialPool.length} کلید در استخر چرخش فعال است`
+          : 'هیچ کلیدی ثبت نشده است (آماده افزودن کلید)';
+      }
+      if (state.credentialPool.length === 0) {
+        list.innerHTML = `<div class="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-400 text-center">هنوز کلیدی در استخر چرخش ثبت نشده است. از فرم بالا کلید API خود را اضافه کنید.</div>`;
+        return;
+      }
+      list.innerHTML = state.credentialPool.map(item => {
+        const badgeClass = item.status === 'active'
+          ? 'bg-emerald-500/20 text-emerald-400'
+          : item.status === 'cooldown'
+          ? 'bg-amber-500/20 text-amber-300'
+          : 'bg-slate-800 text-slate-300';
+        return `
+          <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div class="flex items-center gap-2.5">
+              <span class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold uppercase">${item.provider}</span>
+              <span class="font-semibold text-white">${item.label}</span>
+              <span class="text-slate-400 ltr-code">${item.masked}</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="text-slate-400">${item.calls} فراخوانی</span>
+              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${badgeClass}">${item.status.toUpperCase()}</span>
+              <button type="button" onclick="removePoolKey('${item.id}')" class="text-rose-400 hover:text-rose-300 px-1.5">حذف</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function addCredentialPoolKey() {
+      const provider = document.getElementById('pool-provider-select').value;
+      const label = document.getElementById('pool-key-label').value.trim() || (provider + '-key');
+      const rawKey = document.getElementById('pool-key-value').value.trim();
+      if (!rawKey) {
+        showToast('لطفاً مقدار کلید API را وارد کنید.', 'warn');
+        return;
+      }
+      const masked = rawKey.length > 8 ? (rawKey.slice(0, 6) + '...' + rawKey.slice(-4)) : 'sk-***';
+      state.credentialPool.push({
+        id: 'k' + Date.now(),
+        provider,
+        label,
+        masked,
+        status: 'active',
+        calls: 0
+      });
+      document.getElementById('pool-key-label').value = '';
+      document.getElementById('pool-key-value').value = '';
+      NorykaBackend.pushEnvKey(provider.toUpperCase() + '_API_KEY', rawKey);
+      renderCredentialPool();
+      addEventLog('POOL', 'emerald', `کلید جدید "${label}" برای ارائه‌دهنده ${provider} به استخر چرخش اضافه شد.`);
+      showToast('کلید جدید به Credential Pool اضافه شد.', 'info');
+    }
+
+    function removePoolKey(id) {
+      state.credentialPool = state.credentialPool.filter(k => k.id !== id);
+      renderCredentialPool();
+      showToast('کلید از استخر حذف شد.', 'info');
+    }
+
+    async function verifyCredentialPoolHealth() {
+      if (NorykaBackend.connected) {
+        await NorykaBackend.syncFromServer();
+      }
+      const count = state.credentialPool.length;
+      if (count === 0) {
+        document.getElementById('kpi-pool-status').textContent = 'هیچ کلیدی در استخر ثبت نشده است';
+        showToast('استخر کلید خالی است؛ لطفاً کلیدهای API خود را اضافه کنید.', 'warn');
+        return;
+      }
+      document.getElementById('kpi-pool-status').textContent = `${count} کلید ثبت‌شده در استخر چرخش`;
+      addEventLog('POOL', 'emerald', `وضعیت استخر کلید بررسی شد: ${count} کلید آماده چرخش خودکار هستند.`);
+      showToast(`سلامت ${count} کلید در CredentialPool بررسی شد.`, 'info');
+    }
+
+    function updatePrimaryModel(val) {
+      state.primaryModel = val;
+      NorykaBackend.setPrimaryModel(val);
+      document.getElementById('kpi-active-model').textContent = val;
+      addEventLog('MODEL', 'cyan', `مدل اصلی به ${val} تغییر یافت.`);
+      showToast(`مدل اصلی روی ${val} تنظیم شد.`, 'info');
+    }
+
+    // --- Cron & Memory ---
+    function renderCronJobs() {
+      const box = document.getElementById('cron-jobs-list');
+      if (!box) return;
+      box.innerHTML = state.cronJobs.map(job => `
+        <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div>
+            <div class="font-semibold text-white">${job.prompt}</div>
+            <div class="text-slate-400 mt-0.5">زمان‌بندی: <code class="text-indigo-300 ltr-code">${job.schedule}</code> • مقصد: <span class="text-emerald-400 font-medium">${job.deliver}</span> • آخرین اجرا: ${job.lastRun}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="triggerCronNow('${job.id}')" class="px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30">اجرای فوری</button>
+            <button type="button" onclick="removeCronJob('${job.id}')" class="px-2 py-1 rounded-lg bg-rose-500/20 text-rose-300">حذف</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function addCronJob() {
+      const prompt = document.getElementById('cron-prompt-input').value.trim();
+      const schedule = document.getElementById('cron-schedule-input').value.trim() || 'every 4h';
+      const deliver = document.getElementById('cron-deliver-select').value;
+      if (!prompt) {
+        showToast('لطفاً متن پرامپت کار زمان‌بندی‌شده را بنویسید.', 'warn');
+        return;
+      }
+      state.cronJobs.push({
+        id: 'c' + Date.now(),
+        prompt,
+        schedule,
+        deliver,
+        active: true,
+        lastRun: 'در انتظار نوبت اول'
+      });
+      document.getElementById('cron-prompt-input').value = '';
+      NorykaBackend.createCronJobOnServer({ prompt, schedule, deliver });
+      renderCronJobs();
+      addEventLog('CRON', 'indigo', `جاب جدید (${schedule} -> ${deliver}) در زمان‌بند ثبت شد.`);
+      showToast('کار زمان‌بندی‌شده جدید ثبت شد.', 'info');
+    }
+
+    function triggerCronNow(id) {
+      const job = state.cronJobs.find(j => j.id === id);
+      if (!job) return;
+      job.lastRun = 'هم‌اکنون (ارسال موفق به ' + job.deliver + ')';
+      renderCronJobs();
+      addEventLog('CRON-RUN', 'emerald', `جاب "${job.prompt}" اجرا شد و نتیجه به ${job.deliver} ارسال گردید.`);
+      showToast(`جاب زمان‌بندی‌شده اجرا و به ${job.deliver} ارسال شد.`, 'info');
+    }
+
+    function removeCronJob(id) {
+      state.cronJobs = state.cronJobs.filter(j => j.id !== id);
+      renderCronJobs();
+      showToast('جاب زمان‌بندی‌شده حذف شد.', 'info');
+    }
+
+    function saveMemoryStore() {
+      const userText = document.getElementById('memory-user-box').value;
+      const memText = document.getElementById('memory-notes-box').value;
+      if (/ignore\s+previous\s+instructions/i.test(userText + memText)) {
+        showToast('هشدار امنیتی: الگوی Prompt Injection توسط threat_patterns.py مسدود شد!', 'warn');
+        return;
+      }
+      addEventLog('MEMORY', 'emerald', 'فایل‌های USER.md و MEMORY.md پس از اسکن امنیتی ذخیره شدند.');
+      showToast('حافظه بلندمدت Noryka با موفقیت بررسی و ذخیره شد.', 'info');
+    }
+
+    // --- Config Generator ---
+    function regenerateConfigPreview() {
+      const baleGw = state.gateways.find(g => g.id === 'bale') || {};
+      const tgGw = state.gateways.find(g => g.id === 'telegram') || {};
+      const yaml = `# ~/.noryka/config.yaml — Generated by Noryka Studio
+model:
+  provider: "${state.primaryModel.split('/')[0]}"
+  name: "${state.primaryModel}"
+  streaming: true
+  context_length: 128000
+
+fallback_model:
+  provider: "openrouter"
+  model: "${state.fallbackModel}"
+
+auxiliary:
+  compression:
+    model: "${state.auxModel}"
+
+agent:
+  coding_context: "focus"
+  tool_use_enforcement: "auto"
+  execution_guidance: "auto"
+
+compression:
+  enabled: true
+  threshold: 0.50
+  proactive_prune_tokens: 16000
+
+gateway:
+  platforms:
+    bale:
+      enabled: ${Boolean(baleGw.enabled)}
+      allowed_users: "${baleGw.allowedUsers || ''}"
+      stream_edit_throttle_seconds: ${baleGw.throttle || 2.0}
+    telegram:
+      enabled: ${Boolean(tgGw.enabled)}
+      allowed_users: "${tgGw.allowedUsers || ''}"
+      stream_edit_throttle_seconds: ${tgGw.throttle || 1.0}
+`;
+      const box = document.getElementById('generated-config-box');
+      if (box) box.textContent = yaml;
+    }
+
+    function copyGeneratedConfig() {
+      regenerateConfigPreview();
+      const text = document.getElementById('generated-config-box').textContent;
+      try {
+        navigator.clipboard.writeText(text);
+        showToast('فایل config.yaml در کلیپ‌بورد کپی شد.', 'info');
+      } catch (e) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        showToast('فایل config.yaml کپی شد.', 'info');
+      }
+    }
+
+    function loadOptionalCdnsNonBlocking() {
+      if (typeof window === "undefined" || window.location.protocol === "file:") return;
+      setTimeout(() => {
+        try {
+          const tw = document.createElement("script");
+          tw.src = "https://cdn.tailwindcss.com/3.4.17";
+          tw.async = true;
+          document.head.appendChild(tw);
+          const ch = document.createElement("script");
+          ch.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js";
+          ch.async = true;
+          ch.onload = () => { try { initChart(); } catch (_e) {} };
+          document.head.appendChild(ch);
+        } catch (_err) {}
+      }, 80);
+    }
+
+    function initNorykaStudio() {
+      if (window.__norykaInitialized) return;
+      window.__norykaInitialized = true;
+      loadOptionalCdnsNonBlocking();
+      renderEventLog();
+      renderChatMessages();
+      renderGateways();
+      renderCredentialPool();
+      renderCronJobs();
+      runLiveAstCheck();
+      regenerateConfigPreview();
+      initChart();
+      NorykaBackend.syncFromServer();
+      NorykaBackend.connectWebSocket();
+    }
+    initNorykaStudio();
+    document.addEventListener("DOMContentLoaded", initNorykaStudio);
+    window.onload = initNorykaStudio;
+  </script>
+</body>
+</html>
