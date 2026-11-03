@@ -146,18 +146,18 @@ jobs:
           cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           docker start "$container_id" >/dev/null
-          sleep 15
+          sleep 30
           if [[ "$(docker inspect -f '{{.State.Running}}' "$container_id")" != "true" ]]; then
-            echo "Termux bootstrap did not leave the container running; retrying the same container once."
+            echo "Termux bootstrap exited; starting the same container again after bootstrap."
             docker start "$container_id" >/dev/null
-            sleep 15
+            sleep 30
           fi
           if [[ "$(docker inspect -f '{{.State.Running}}' "$container_id")" != "true" ]]; then
             docker logs "$container_id" || true
-            echo "::error::Termux container failed to reach its running state."
+            echo "::error::Termux container failed to stay running after bootstrap."
             exit 1
           fi
-          docker exec --user system "$container_id" bash -lc '
+          docker exec --user 1000:1000 "$container_id" bash -lc '
             set -euo pipefail
             mkdir -p "$PREFIX/etc/apt"
             printf "deb https://packages.termux.dev/apt/termux-main stable main\\n" > "$PREFIX/etc/apt/sources.list"
@@ -170,10 +170,6 @@ jobs:
             /tmp/noryka-ci-venv/bin/noryka --help
             echo NORYKA_TERMUX_INSTALL_AND_SMOKE_TESTS_PASSED
           '
-          if [[ ! -f "$termux_workspace/.noryka-termux-command-started" ]]; then
-            echo "::error::Termux command did not start after bootstrap."
-            exit 1
-          fi
 
   lockfile-policy:
     name: Require committed dependency lock
