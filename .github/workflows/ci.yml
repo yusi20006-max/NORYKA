@@ -52,6 +52,21 @@ jobs:
           path: uv.lock
           if-no-files-found: error
           retention-days: 3
+      - name: Commit the generated lock on the hardening branch
+        if: steps.resolve.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          if [[ "$branch" == release/* ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add uv.lock
+            git commit -m "build: add resolved Python dependency lock"
+            git push origin "HEAD:$branch"
+          else
+            echo "Lockfile changed; it will not be pushed to the protected default branch."
+          fi
 
   tests:
     name: Python ${{ matrix.python-version }} tests
@@ -75,7 +90,7 @@ jobs:
           version: "0.13.5"
           enable-cache: true
       - name: Install the locked core and test dependencies
-        run: uv sync --frozen --extra test --no-install-project
+        run: uv sync --python ${{ matrix.python-version }} --frozen --extra test --no-install-project
       - name: Run every checked-in pytest suite with the canonical isolated runner
         shell: bash
         run: |
@@ -89,7 +104,7 @@ jobs:
             skills/productivity/microsoft-office/tests/test_xlsx_skill.py \
             skills/productivity/pdf/tests/test_pdf_skill.py
       - name: Lint the new regression test
-        run: uv run --frozen --extra test --no-sync ruff check tests/test_termux_target.py
+        run: uv run --python ${{ matrix.python-version }} --frozen --extra test --no-sync ruff check tests/test_termux_target.py
 
   shell-validation:
     name: Shell syntax and static checks
@@ -121,13 +136,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          termux_workspace="$RUNNER_TEMP/noryka-termux-workspace"
+          mkdir -p "$termux_workspace"
+          tar --exclude=.git -cf - . | tar -xf - -C "$termux_workspace"
+          chmod -R a+rwX "$termux_workspace"
           docker run --rm --platform linux/arm64 \
-            --entrypoint /data/data/com.termux/files/usr/bin/bash \
             --env NORYKA_VENV_DIR=/tmp/noryka-ci-venv \
-            --volume "$PWD:/workspace" \
+            --volume "$termux_workspace:/workspace" \
             --workdir /workspace \
             termux/termux-docker@sha256:c14ffb703abf44f2d3bf7fdffdcc50df7d1454d09c705be190e0342a0b47f303 \
-            -lc '
+            bash -lc '
               set -euo pipefail
               bash ./install-noryka-termux.sh
               /tmp/noryka-ci-venv/bin/python -m pip install "pytest>=8.3,<9"
