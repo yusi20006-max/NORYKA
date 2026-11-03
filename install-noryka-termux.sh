@@ -11,7 +11,7 @@ if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
     echo "[1/4] Detected Android / Termux environment."
     echo "      Installing required binary packages via pkg (no silent error masking)..."
     pkg update -y
-    pkg install -y python git ripgrep clang libffi openssl \
+    pkg install -y python git ripgrep clang libffi openssl rust \
         python-cryptography python-pillow python-psutil
     echo "[2/4] Creating virtual environment with --system-site-packages at $VENV_DIR ..."
     python3 -m venv --system-site-packages "$VENV_DIR"
@@ -30,7 +30,15 @@ mkdir -p "$HOME/.noryka/sessions" "$HOME/.noryka/memories" "$HOME/.noryka/skills
 chmod 700 "$HOME/.noryka"
 
 echo "[4/4] Preparing isolated build backend in the virtual environment..."
-python -m pip install --upgrade "setuptools>=68.0.0" wheel
+python -m pip install --upgrade "setuptools>=68.0.0" wheel setuptools-rust
+if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
+    rustc --version
+    cargo --version
+    echo "      Building maturin for Android/Bionic (required by pydantic-core)..."
+    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+        python -m pip install --no-build-isolation --no-binary=maturin "maturin>=1.15,<2"
+    maturin --version
+fi
 python -c "import setuptools, wheel; print('Build backend ready:', setuptools.__version__, wheel.__version__)"
 
 echo "      Installing Noryka with [termux] extras (Telegram, Bale, MCP, Core)..."
