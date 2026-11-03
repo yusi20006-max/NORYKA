@@ -32,6 +32,19 @@ chmod 700 "$HOME/.noryka"
 echo "[4/4] Preparing isolated build backend in the virtual environment..."
 python -m pip install --upgrade "setuptools>=68.0.0" wheel setuptools-rust
 if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
+    if [ -z "${ANDROID_API_LEVEL:-}" ]; then
+        ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null || true)"
+    fi
+    case "${ANDROID_API_LEVEL:-}" in
+        ''|*[!0-9]*) ANDROID_API_LEVEL=24 ;;
+    esac
+    if [ "$ANDROID_API_LEVEL" -lt 24 ]; then ANDROID_API_LEVEL=24; fi
+    export ANDROID_API_LEVEL
+    case "$(uname -m)" in
+        aarch64|arm64) export CARGO_BUILD_TARGET="${CARGO_BUILD_TARGET:-aarch64-linux-android}" ;;
+    esac
+    echo "      Android API level: $ANDROID_API_LEVEL"
+    echo "      Rust target: ${CARGO_BUILD_TARGET:-auto}"
     rustc --version
     cargo --version
     echo "      Building maturin for Android/Bionic (required by pydantic-core)..."
