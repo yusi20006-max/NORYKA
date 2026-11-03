@@ -53,6 +53,16 @@ termux = [
   "python-telegram-bot[webhooks]>=21.6",
   "noryka[mcp]",
 ]
+test = [
+  "pytest>=8.3,<9",
+  "ruff>=0.11,<1",
+  "python-docx>=1.1,<2",
+  "python-pptx>=1.0,<2",
+  "openpyxl>=3.1,<4",
+  "reportlab>=4.2,<6",
+  "pypdf>=5,<7",
+  "pypdfium2>=4.30,<6",
+]
 
 [build-system]
 requires = ["setuptools>=68.0.0", "wheel"]
