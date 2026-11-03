@@ -91,22 +91,18 @@ jobs:
           enable-cache: true
       - name: Install the locked core and test dependencies
         run: uv sync --python ${{ matrix.python-version }} --frozen --extra test --no-install-project
-      - name: Run every checked-in pytest suite in isolated per-file processes
+      - name: Run every checked-in pytest suite with per-file isolation
         shell: bash
         run: |
           set -euo pipefail
-          python_bin="$PWD/.venv/bin/python"
-          for test_file in \
+          export NORYKA_PYTHON="$PWD/.venv/bin/python"
+          bash scripts/run_tests.sh \
             tests/test_noryka_smoke.py \
             tests/test_termux_target.py \
             skills/productivity/microsoft-office/tests/test_docx_skill.py \
             skills/productivity/microsoft-office/tests/test_powerpoint_skill.py \
             skills/productivity/microsoft-office/tests/test_xlsx_skill.py \
-            skills/productivity/pdf/tests/test_pdf_skill.py; do
-            echo "::group::pytest $test_file"
-            TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0 "$python_bin" -m pytest -q "$test_file"
-            echo "::endgroup::"
-          done
+            skills/productivity/pdf/tests/test_pdf_skill.py
       - name: Lint the new regression test
         run: uv run --python ${{ matrix.python-version }} --frozen --extra test --no-sync ruff check tests/test_termux_target.py
 
