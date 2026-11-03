@@ -157,7 +157,7 @@ jobs:
           mkdir -p "$termux_workspace"
           tar --exclude=.git -cf - . | tar -xf - -C "$termux_workspace"
           chmod -R a+rwX "$termux_workspace"
-          container_id="$(docker create --platform linux/arm64 \
+          container_id=$(docker create --platform linux/arm64 \
             --env NORYKA_VENV_DIR=/tmp/noryka-ci-venv \
             --volume "$termux_workspace:/workspace" \
             --workdir /workspace \
@@ -175,7 +175,7 @@ jobs:
               /tmp/noryka-ci-venv/bin/python -m pytest -q tests/test_noryka_smoke.py tests/test_termux_target.py
               /tmp/noryka-ci-venv/bin/noryka --help
               echo NORYKA_TERMUX_INSTALL_AND_SMOKE_TESTS_PASSED
-            ')"
+            ')
           cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           set +e
