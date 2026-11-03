@@ -84,7 +84,7 @@ else
     *) echo -e "${RED}✗${NC} unsupported arch $(uname -m)" >&2; exit 1 ;;
   esac
 fi
-target="$os-$arch"
+# Resolve Android/Bionic before reading the pinned bootstrap artifact.\n# shellcheck source=scripts/termux/target.sh\n. "$SCRIPT_DIR/scripts/termux/target.sh"\ntarget="$(noryka_target_for "$os" "$arch" "${TERMUX_VERSION:-}" "${PREFIX:-}" "${NORYKA_TERMUX_ROOT:-/data/data/com.termux/files/usr}")"
 
 # The machine-written lock has one member per line. Follow object names and
 # braces, not indentation, to read pins before Python is available.
