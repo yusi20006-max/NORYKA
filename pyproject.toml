@@ -61,7 +61,8 @@ test = [
   "openpyxl>=3.1,<4",
   "reportlab>=4.2,<6",
   "pypdf>=5,<7",
-  "pypdfium2>=4.30,<6",\n  "pdfplumber>=0.11,<1",
+  "pypdfium2>=4.30,<6",
+  "pdfplumber>=0.11,<1",
 ]
 
 [build-system]
