@@ -11,8 +11,8 @@ if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
     echo "[1/4] Detected Android / Termux environment."
     echo "      Installing required binary packages via pkg (no silent error masking)..."
     if [ "${NORYKA_SKIP_PKG_UPDATE:-0}" != "1" ]; then
-    pkg update -y
-fi
+        pkg update -y
+    fi
     pkg install -y python git ripgrep clang libffi openssl rust \
         python-cryptography python-pillow python-psutil
     echo "[2/4] Creating virtual environment with --system-site-packages at $VENV_DIR ..."
