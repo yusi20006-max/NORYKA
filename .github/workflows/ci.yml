@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: noryka-ci-${{ github.ref }}
@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           export NORYKA_PYTHON="$PWD/.venv/bin/python"
-          scripts/run_tests.sh \
+          bash scripts/run_tests.sh \
             tests/test_noryka_smoke.py \
             tests/test_termux_target.py \
             skills/productivity/microsoft-office/tests/test_docx_skill.py \
