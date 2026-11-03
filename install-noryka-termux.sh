@@ -10,7 +10,7 @@ VENV_DIR="${NORYKA_VENV_DIR:-$HOME/.noryka/venv}"
 if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux"* ]]; then
     echo "[1/4] Detected Android / Termux environment."
     echo "      Installing required binary packages via pkg (no silent error masking)..."
-    pkg update -y
+    if [ "${NORYKA_SKIP_PKG_UPDATE:-0}" != "1" ]; then\n    pkg update -y\nfi
     pkg install -y python git ripgrep clang libffi openssl rust \
         python-cryptography python-pillow python-psutil
     echo "[2/4] Creating virtual environment with --system-site-packages at $VENV_DIR ..."
