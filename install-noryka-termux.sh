@@ -29,8 +29,12 @@ echo "[3/4] Preparing Noryka runtime directories at ~/.noryka ..."
 mkdir -p "$HOME/.noryka/sessions" "$HOME/.noryka/memories" "$HOME/.noryka/skills" "$HOME/.noryka/logs"
 chmod 700 "$HOME/.noryka"
 
-echo "[4/4] Installing Noryka with [termux] extras (Telegram, Bale, MCP, Core)..."
-pip install --no-build-isolation -e ".[termux]"
+echo "[4/4] Preparing isolated build backend in the virtual environment..."
+python -m pip install --upgrade "setuptools>=68.0.0" wheel
+python -c "import setuptools, wheel; print('Build backend ready:', setuptools.__version__, wheel.__version__)"
+
+echo "      Installing Noryka with [termux] extras (Telegram, Bale, MCP, Core)..."
+python -m pip install --no-build-isolation -e ".[termux]"
 
 if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
     ln -sf "$VENV_DIR/bin/noryka" "$PREFIX/bin/noryka"
