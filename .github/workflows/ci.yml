@@ -157,22 +157,42 @@ jobs:
           mkdir -p "$termux_workspace"
           tar --exclude=.git -cf - . | tar -xf - -C "$termux_workspace"
           chmod -R a+rwX "$termux_workspace"
-          docker run --rm --platform linux/arm64 \
+          container_id="$(docker create --platform linux/arm64 \
             --env NORYKA_VENV_DIR=/tmp/noryka-ci-venv \
             --volume "$termux_workspace:/workspace" \
             --workdir /workspace \
             termux/termux-docker@sha256:c14ffb703abf44f2d3bf7fdffdcc50df7d1454d09c705be190e0342a0b47f303 \
             bash -lc '
+              touch /workspace/.noryka-termux-command-started
               set -euo pipefail
               mkdir -p "$PREFIX/etc/apt"
-              printf 'deb https://packages.termux.dev/apt/termux-main stable main\n' > "$PREFIX/etc/apt/sources.list"
+              printf "deb https://packages.termux.dev/apt/termux-main stable main\\n" > "$PREFIX/etc/apt/sources.list"
               apt-get update
               export NORYKA_SKIP_PKG_UPDATE=1
+              echo NORYKA_TERMUX_INSTALL_COMMAND_STARTED
               bash ./install-noryka-termux.sh
               /tmp/noryka-ci-venv/bin/python -m pip install "pytest>=8.3,<9"
               /tmp/noryka-ci-venv/bin/python -m pytest -q tests/test_noryka_smoke.py tests/test_termux_target.py
               /tmp/noryka-ci-venv/bin/noryka --help
-            '
+              echo NORYKA_TERMUX_INSTALL_AND_SMOKE_TESTS_PASSED
+            ')"
+          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          set +e
+          docker start -a "$container_id"
+          first_status=$?
+          set -e
+          if [[ "$first_status" -ne 0 ]]; then
+            exit "$first_status"
+          fi
+          if [[ ! -f "$termux_workspace/.noryka-termux-command-started" ]]; then
+            echo "Termux bootstrap completed; restarting the same container to execute the validation command."
+            docker start -a "$container_id"
+          fi
+          if [[ ! -f "$termux_workspace/.noryka-termux-command-started" ]]; then
+            echo "::error::Termux command did not start after bootstrap."
+            exit 1
+          fi
 
   lockfile-policy:
     name: Require committed dependency lock
