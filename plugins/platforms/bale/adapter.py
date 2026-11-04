@@ -254,9 +254,14 @@ class BaleAdapter(BasePlatformAdapter):
                 await self._handle_builtin_bale_command("/panel", tid, tid, "dm")
 
     @staticmethod
+@staticmethod
     def _build_bale_control_panel_markup() -> Dict[str, Any]:
         return {
             "inline_keyboard": [
+                [
+                    {"text": "🧠 تعویض مدل و فالبک (/fallback)", "callback_data": "cmd:/fallback"},
+                    {"text": "💾 بکاپ و ری‌استور (/backup)", "callback_data": "cmd:/backup"},
+                ],
                 [
                     {"text": "📅 امروز و تقویم (/today)", "callback_data": "cmd:/today"},
                     {"text": "💰 طلا و ارز (/market)", "callback_data": "cmd:/market"},
@@ -275,10 +280,9 @@ class BaleAdapter(BasePlatformAdapter):
                 ],
                 [
                     {"text": "🔄 نشست جدید (/new)", "callback_data": "cmd:/new"},
-                    {"text": "🧠 انتخاب مدل (/model)", "callback_data": "cmd:/model"},
+                    {"text": "✦ درباره نوریکا (/about)", "callback_data": "cmd:/about"},
                 ],
                 [
-                    {"text": "✦ درباره نوریکا (/about)", "callback_data": "cmd:/about"},
                     {"text": "⏹ توقف اجرا (/stop)", "callback_data": "cmd:/stop"},
                 ],
             ]
@@ -351,6 +355,37 @@ class BaleAdapter(BasePlatformAdapter):
             asyncio.create_task(self._schedule_bale_reminder(chat_id, sec, h_dur, note))
             await self.send(chat_id, f"✅ یادآور ثبت شد! تا *{h_dur}* دیگر درباره «*{note}*» اطلاع می‌دهم.", reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
             return True
+        if first_word in {"/fallback", "/model"}:
+            text, fb_markup = await format_fallback_card()
+            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": fb_markup})
+            return True
+
+        if first_word.startswith("/model_set"):
+            preset_id = arg_rest or first_word.split(maxsplit=1)[-1]
+            res = switch_model_and_provider(preset_id)
+            text = f"✅ *مدل و پروایدر با موفقیت تعویض شد!*\n\n🎯 *مدل فعال:* `{res['active_model']}`\n🏢 *پروایدر:* `{res['active_provider']}`\n🏷 *عنوان:* {res['label']}"
+            _, fb_markup = await format_fallback_card()
+            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": fb_markup})
+            return True
+
+        if first_word == "/backup":
+            text, bk_markup = await format_backup_card(arg_rest)
+            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": bk_markup})
+            return True
+
+        if first_word == "/restore_latest":
+            b_dir = _noryka_home() / "backups"
+            all_b = sorted(b_dir.glob("noryka-backup-*.zip"), key=lambda x: x.stat().st_mtime, reverse=True)
+            if not all_b:
+                await self.send(chat_id, "⚠️ هیچ فایل بکاپی پیدا نشد.", reply_to=reply_to_id, metadata={"reply_markup": self._build_bale_control_panel_markup()})
+                return True
+            latest_b = all_b[0]
+            r = restore_compact_backup(latest_b)
+            msg = f"✅ *بکاپ بازیابی شد!*\n\n📁 `{latest_b.name}` ({r.get('restored_count', 0)} فایل)" if r.get("ok") else f"⚠️ {r.get('error')}"
+            _, bk_markup = await format_backup_card()
+            await self.send(chat_id, msg, reply_to=reply_to_id, metadata={"reply_markup": bk_markup})
+            return True
+
         if first_word == "/doc":
             await self.send(chat_id, search_document_vault(arg_rest), reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
             return True
