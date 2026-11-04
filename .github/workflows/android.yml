@@ -21,8 +21,9 @@ jobs:
           java-version: "17"
           distribution: "temurin"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -31,10 +32,12 @@ jobs:
 
       - name: Build Noryka Companion APK
         working-directory: ./android
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Prepare Noryka.apk
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk Noryka.apk
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk Noryka.apk
+          ls -lh Noryka.apk
 
       - name: Upload Noryka.apk Artifact
         uses: actions/upload-artifact@v4
