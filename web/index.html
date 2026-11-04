@@ -86,6 +86,30 @@
       background: rgba(99, 102, 241, 0.45);
       border-radius: 9999px;
     }
+  
+    html, body {
+      max-width: 100vw !important;
+      width: 100% !important;
+      overflow-x: hidden !important;
+      touch-action: pan-y;
+      -webkit-tap-highlight-color: transparent;
+    }
+    main, section, div { max-width: 100%; }
+    pre, code {
+      white-space: pre-wrap !important;
+      word-break: break-word !important;
+      overflow-x: hidden !important;
+      max-width: 100% !important;
+    }
+    .gemini-gradient-text {
+      background: linear-gradient(135deg, #00F5FF 0%, #818CF8 50%, #D946EF 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    #gemini-drawer { transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1); }
+    #gemini-drawer.drawer-closed { transform: translateX(105%); }
+    #gemini-drawer.drawer-open { transform: translateX(0%); }
+
   </style>
 </head>
 <body class="bg-slate-950 text-slate-100 dark:bg-slate-950 dark:text-slate-100 min-h-screen selection:bg-indigo-500 selection:text-white transition-colors duration-200">
@@ -131,54 +155,59 @@
     </div>
   </div>
 
-  <!-- Top Header -->
-  <header class="sticky top-0 z-30 glass-panel border-b border-indigo-500/20 px-4 lg:px-8 py-3">
-    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-      <div class="flex items-center gap-3">
-        <div class="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-500 via-purple-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-indigo-500/30 font-extrabold text-white text-xl">
-          N
-        </div>
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-cyan-300 bg-clip-text text-transparent">NORYKA STUDIO</h1>
-            <span class="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">v1.0 Autonomous</span>
+  <!-- Gemini Slide-Out Drawer Backdrop -->
+  <div id="gemini-drawer-backdrop" onclick="toggleGeminiDrawer(false)" class="fixed inset-0 z-40 hidden bg-black/65 backdrop-blur-sm transition-opacity"></div>
+
+  <!-- Gemini Slide-Out Navigation Drawer -->
+  <aside id="gemini-drawer" class="drawer-closed fixed top-0 right-0 bottom-0 z-50 w-72 max-w-[84vw] bg-slate-950/95 backdrop-blur-xl border-l border-slate-800/90 flex flex-col justify-between p-4 shadow-2xl overflow-y-auto">
+    <div class="space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800/80">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-2xl bg-gradient-to-br from-cyan-400 via-indigo-500 to-purple-600 flex items-center justify-center shadow-md font-extrabold text-white text-base">✦</div>
+          <div>
+            <div class="text-sm font-extrabold text-white">NORYKA</div>
+            <div class="text-[10px] text-cyan-400">Nova Star v3.2 · Gemini UI</div>
           </div>
-          <p class="text-xs text-slate-400">موتور دستیار شخصی، دروازه چندکاناله (تلگرام و بله) و استودیو کدنویسی پیشرفته</p>
         </div>
+        <button type="button" onclick="toggleGeminiDrawer(false)" class="w-8 h-8 rounded-full bg-slate-900 text-slate-300 flex items-center justify-center text-sm border border-slate-800">✕</button>
       </div>
 
-      <!-- Navigation Pills -->
-      <nav class="flex items-center gap-1.5 overflow-x-auto py-1">
-        <button type="button" onclick="switchTab('overview')" id="tab-btn-overview" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30">
-          داشبورد و وضعیت
-        </button>
-        <button type="button" onclick="switchTab('chat')" id="tab-btn-chat" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
-          چت و استودیو کدنویسی
-        </button>
-        <button type="button" onclick="switchTab('gateways')" id="tab-btn-gateways" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
-          دروازه‌ها (تلگرام / بله)
-        </button>
-        <button type="button" onclick="switchTab('providers')" id="tab-btn-providers" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
-          مدل‌ها و Fallback
-        </button>
-        <button type="button" onclick="switchTab('automation')" id="tab-btn-automation" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
-          زمان‌بند Cron و حافظه
-        </button>
-        <button type="button" onclick="switchTab('deploy')" id="tab-btn-deploy" class="tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80">
-          خروجی کانفیگ و Termux
-        </button>
-      </nav>
+      <button type="button" onclick="resetChatSession(); switchTab('chat'); toggleGeminiDrawer(false);" class="w-full py-2.5 px-4 rounded-full bg-cyan-500/15 border border-cyan-400/40 text-cyan-200 text-xs font-bold flex items-center justify-center gap-2">
+        <span>＋</span><span>گفتگوی جدید با نوریکا</span>
+      </button>
 
-      <!-- Right Status Actions -->
-      <div class="flex items-center gap-2">
-        <div class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs">
-          <span id="runtime-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span class="text-slate-300">هسته Noryka:</span>
-          <span id="runtime-status-label" class="font-bold text-emerald-400">آماده</span>
-        </div>
-        <button type="button" onclick="toggleTheme()" id="btn-theme-toggle" class="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700">
-          تم روشن/تاریک
-        </button>
+      <div class="space-y-1">
+        <div class="px-2 pb-1 text-[10px] font-bold text-slate-500">بخش‌های نوریکا</div>
+        <button type="button" onclick="switchTab('chat')" id="tab-btn-chat" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold bg-indigo-600 text-white flex items-center gap-2.5"><span>💬</span><span>چت هوشمند نوریکا (Gemini)</span></button>
+        <button type="button" onclick="switchTab('health')" id="tab-btn-health" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5"><span>📡</span><span>رادار سلامت و وضعیت گوشی</span></button>
+        <button type="button" onclick="switchTab('gateways')" id="tab-btn-gateways" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5"><span>📲</span><span>دروازه‌های پیام‌رسان (بله / تلگرام)</span></button>
+        <button type="button" onclick="switchTab('providers')" id="tab-btn-providers" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5"><span>🧠</span><span>مدل‌ها و چرخش کلید (Fallback)</span></button>
+        <button type="button" onclick="switchTab('automation')" id="tab-btn-automation" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5"><span>⏰</span><span>زمان‌بند Cron و حافظه</span></button>
+        <button type="button" onclick="switchTab('overview')" id="tab-btn-overview" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5"><span>📊</span><span>آمار مصرف توکن و لاگ زنده</span></button>
+        <button type="button" onclick="switchTab('deploy')" id="tab-btn-deploy" class="tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5"><span>⚙️</span><span>خروجی کانفیگ و Termux</span></button>
+      </div>
+    </div>
+
+    <div class="pt-3 border-t border-slate-800/80 space-y-2">
+      <button type="button" onclick="triggerAppControl('panel', 'پنل شیشه‌ای به بله ارسال شد!')" class="w-full py-2 px-3 rounded-xl bg-purple-600/20 border border-purple-500/30 text-purple-300 text-xs font-semibold flex items-center justify-center gap-2">
+        <span>🎛</span><span>ارسال پنل شیشه‌ای به بله</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Gemini Minimal Top App Bar -->
+  <header class="sticky top-0 z-30 glass-panel border-b border-slate-800/80 px-3.5 py-2.5">
+    <div class="max-w-5xl mx-auto flex items-center justify-between gap-2">
+      <button type="button" onclick="toggleGeminiDrawer(true)" class="w-10 h-10 rounded-full bg-slate-900/90 border border-slate-800 flex items-center justify-center text-slate-200 text-lg">☰</button>
+      <div onclick="switchTab('chat')" class="cursor-pointer flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 border border-slate-800/90">
+        <span class="text-cyan-400 font-extrabold text-sm">✦</span>
+        <span class="font-extrabold text-sm text-white">Noryka</span>
+        <span id="runtime-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span id="runtime-status-label" class="text-[10px] font-bold text-emerald-400">آنلاین</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <button type="button" onclick="resetChatSession(); switchTab('chat');" class="w-9 h-9 rounded-full bg-slate-900/90 border border-slate-800 flex items-center justify-center text-cyan-300 text-base font-bold">＋</button>
+        <button type="button" onclick="toggleTheme()" id="btn-theme-toggle" class="w-9 h-9 rounded-full bg-slate-900/90 border border-slate-800 flex items-center justify-center text-slate-300 text-xs">🌙</button>
       </div>
     </div>
   </header>
@@ -187,7 +216,7 @@
   <main class="max-w-7xl mx-auto px-4 lg:px-8 py-6">
 
     <!-- TAB 1: OVERVIEW & LIVE TELEMETRY -->
-    <section id="view-overview" class="space-y-6">
+    <section id="view-overview" class="hidden space-y-6">
       <!-- Top KPI Cards -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="glass-panel rounded-2xl p-5">
@@ -264,86 +293,48 @@
     </section>
 
     <!-- TAB 2: AI CHAT & CODING STUDIO -->
-    <section id="view-chat" class="hidden space-y-6">
-      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <!-- Chat Column -->
-        <div class="lg:col-span-7 glass-panel rounded-2xl p-5 flex flex-col h-[620px]">
-          <div class="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-800">
-            <div class="flex items-center gap-2">
-              <span class="w-2.5 h-2.5 rounded-full bg-indigo-400"></span>
-              <h2 class="text-base font-bold text-white">کنسول تعاملی Noryka (چت و اجرای ابزار)</h2>
-            </div>
-            <div class="flex items-center gap-2">
-              <select id="chat-posture-select" onchange="changeCodingPosture(this.value)" class="px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-200">
-                <option value="coding">حالت: Coding Posture (۲۹۴ ماژول ابزار + AST)</option>
-                <option value="minimum">حالت: Minimum Text Runtime (بدون ابزار)</option>
-                <option value="safe">حالت: Safe Public (ضد SSRF - بدون ترمینال)</option>
-              </select>
-              <button type="button" onclick="compressCurrentChat()" class="px-2.5 py-1 rounded-xl bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/30 text-xs font-medium">
-                /compress
-              </button>
-              <button type="button" onclick="resetChatSession()" class="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium">
-                /new
-              </button>
-            </div>
+    <section id="view-chat" class="space-y-4 pb-4">
+      <div class="max-w-3xl mx-auto flex flex-col min-h-[calc(100vh-120px)] justify-between space-y-4">
+        <div id="gemini-hero-greeting" class="pt-4 pb-2 text-center space-y-3">
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 text-[11px] font-semibold">
+            <span>⟐ ✦ ⟐</span><span>Noryka Autonomous Core v3.2</span>
           </div>
-
-          <!-- Messages Stream -->
-          <div id="chat-messages" class="flex-1 overflow-y-auto space-y-3 pr-1 text-sm"></div>
-
-          <!-- Quick Prompts -->
-          <div class="flex flex-wrap gap-1.5 my-2.5">
-            <button type="button" onclick="sendQuickPrompt('پروژه فعلی رو با ast_code_analyzer بررسی کن و ساختار کلاس‌ها رو بگو')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 text-slate-300 border border-slate-800 text-xs">
-              تحلیل AST پروژه
+          <h2 class="text-2xl font-extrabold gemini-gradient-text">سلام! چطور می‌تونم کمکت کنم؟</h2>
+          <div class="grid grid-cols-2 gap-2.5 text-right max-w-lg mx-auto pt-2">
+            <button type="button" onclick="switchTab('health')" class="p-3 rounded-2xl bg-slate-900/85 border border-slate-800 flex items-center gap-2">
+              <span class="text-lg">📡</span><div><div class="text-xs font-bold text-cyan-300">رادار سلامت گوشی</div><div class="text-[10px] text-slate-400">پینگ بله، رم و باتری</div></div>
             </button>
-            <button type="button" onclick="sendQuickPrompt('وضعیت اتصال دروازه‌های تلگرام و بله و استخر کلیدها رو گزارش بده')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 text-slate-300 border border-slate-800 text-xs">
-              گزارش وضعیت تلگرام و بله
+            <button type="button" onclick="triggerAppControl('panel', 'پنل شیشه‌ای به بله ارسال شد!')" class="p-3 rounded-2xl bg-slate-900/85 border border-slate-800 flex items-center gap-2">
+              <span class="text-lg">🎛</span><div><div class="text-xs font-bold text-purple-300">ارسال پنل به بله</div><div class="text-[10px] text-slate-400">۱۰ دکمه شیشه‌ای</div></div>
             </button>
-            <button type="button" onclick="sendQuickPrompt('یک پچ V4A برای بهینه‌سازی حلقه مکالمه پیشنهاد بده و سینتکسش رو تست کن')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-indigo-950 text-slate-300 border border-slate-800 text-xs">
-              تولید و تست Patch کد
+            <button type="button" onclick="switchTab('gateways')" class="p-3 rounded-2xl bg-slate-900/85 border border-slate-800 flex items-center gap-2">
+              <span class="text-lg">📲</span><div><div class="text-xs font-bold text-emerald-300">دروازه بله و تلگرام</div><div class="text-[10px] text-slate-400">مدیریت توکن‌ها</div></div>
             </button>
-          </div>
-
-          <!-- Input Box -->
-          <div class="flex items-center gap-2 pt-2 border-t border-slate-800">
-            <input id="chat-input" type="text" onkeydown="if(event.key==='Enter') sendChatMessage()" placeholder="پیام، دستور کدنویسی یا دستور اسلش (/model, /compress, /stop) را بنویسید..." class="flex-1 px-4 py-2.5 rounded-xl bg-slate-900/90 border border-slate-700 text-sm text-white focus:outline-none focus:border-indigo-500" />
-            <button type="button" onclick="sendChatMessage()" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold shadow-lg shadow-indigo-600/30">
-              ارسال
+            <button type="button" onclick="toggleAstWorkbench()" class="p-3 rounded-2xl bg-slate-900/85 border border-slate-800 flex items-center gap-2">
+              <span class="text-lg">💻</span><div><div class="text-xs font-bold text-indigo-300">تحلیلگر کد AST</div><div class="text-[10px] text-slate-400">بررسی سینتکس</div></div>
             </button>
           </div>
         </div>
 
-        <!-- Live AST Code Analyzer & Patch Workbench -->
-        <div class="lg:col-span-5 glass-panel rounded-2xl p-5 flex flex-col h-[620px]">
-          <div class="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
-            <div>
-              <h2 class="text-base font-bold text-white">میزکار کدنویسی و تحلیلگر زنده AST</h2>
-              <p class="text-xs text-slate-400">تست زنده ابزار <code class="text-indigo-300">ast_code_analyzer</code> و بررسی گاردهای امنیتی</p>
-            </div>
-            <button type="button" onclick="runLiveAstCheck()" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">
-              تحلیل کد و بررسی سینتکس
-            </button>
+        <div id="chat-messages" class="flex-1 overflow-y-auto space-y-3 px-1 text-sm max-h-[50vh]"></div>
+
+        <div id="ast-workbench-card" class="hidden glass-panel rounded-2xl p-4 space-y-3 border border-indigo-500/30">
+          <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+            <span class="text-xs font-bold text-indigo-300">💻 میزکار تحلیلگر کد (AST)</span>
+            <button type="button" onclick="runLiveAstCheck()" class="px-3 py-1 rounded-xl bg-emerald-600 text-white text-[11px] font-semibold">تحلیل کد</button>
           </div>
+          <textarea id="ast-code-editor" rows="4" class="w-full p-2.5 rounded-xl bg-slate-900 border border-slate-700 text-xs text-emerald-300 ltr-code">class NorykaAgent:
+    pass</textarea>
+          <span id="ast-badge" class="hidden">Syntax Valid</span>
+          <pre id="ast-output-box" class="p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-300 ltr-code max-h-32 overflow-y-auto"></pre>
+        </div>
 
-          <label class="text-xs text-slate-300 mb-1 font-medium">کد پایتون جهت بررسی قبل از اعمال Patch:</label>
-          <textarea id="ast-code-editor" rows="10" class="w-full p-3 rounded-xl bg-slate-900/95 border border-slate-700 text-xs text-emerald-300 ltr-code focus:outline-none focus:border-indigo-500 resize-none">from agent.conversation_loop import run_conversation
-from tools.registry import registry
-
-class NorykaCodingAgent:
-    def __init__(self, model: str = "claude-sonnet-4"):
-        self.model = model
-
-    async def execute_verified_patch(self, file_path: str, patch_diff: str) -> dict:
-        """Apply V4A patch and auto-verify AST syntax."""
-        return {"status": "verified", "target": file_path}
-</textarea>
-
-          <div class="mt-3 flex-1 flex flex-col overflow-hidden">
-            <div class="flex items-center justify-between mb-1">
-              <span class="text-xs font-semibold text-slate-300">خروجی تحلیلگر AST و گارد امنیتی Noryka:</span>
-              <span id="ast-badge" class="px-2 py-0.5 text-[11px] rounded-full bg-emerald-500/20 text-emerald-400">Syntax Valid</span>
-            </div>
-            <pre id="ast-output-box" class="flex-1 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 ltr-code overflow-y-auto"></pre>
+        <div class="sticky bottom-2 z-20 pt-1">
+          <select id="chat-posture-select" class="hidden"><option value="coding">Coding</option></select>
+          <div class="p-1.5 rounded-full bg-slate-900/95 border border-slate-700/90 shadow-2xl flex items-center gap-2">
+            <button type="button" onclick="toggleAstWorkbench()" class="w-9 h-9 rounded-full bg-slate-800 text-indigo-300 flex items-center justify-center text-xs font-bold shrink-0">&lt;/&gt;</button>
+            <input id="chat-input" type="text" onkeydown="if(event.key==='Enter') sendChatMessage()" placeholder="از نوریکا بپرسید یا دستور بنویسید..." class="flex-1 bg-transparent border-0 px-2 py-2 text-sm text-white focus:outline-none" />
+            <button type="button" onclick="sendChatMessage()" class="w-10 h-10 rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 text-white flex items-center justify-center text-sm font-bold shrink-0">➤</button>
           </div>
         </div>
       </div>
@@ -684,7 +675,7 @@ class NorykaCodingAgent:
 
     // --- Application State ---
     const state = window.state = {
-      activeTab: 'overview',
+      activeTab: 'chat',
       codingPosture: 'coding',
       primaryModel: 'anthropic/claude-sonnet-4',
       fallbackModel: 'deepseek/deepseek-chat-v3',
@@ -756,25 +747,41 @@ class NorykaCodingAgent:
       showToast('گزارش رویدادها پاک‌سازی شد.', 'info');
     }
 
+    function toggleGeminiDrawer(open) {
+      const d = document.getElementById('gemini-drawer');
+      const b = document.getElementById('gemini-drawer-backdrop');
+      if (!d || !b) return;
+      if (open) { d.classList.remove('drawer-closed'); d.classList.add('drawer-open'); b.classList.remove('hidden'); }
+      else { d.classList.remove('drawer-open'); d.classList.add('drawer-closed'); b.classList.add('hidden'); }
+    }
+    function toggleAstWorkbench() {
+      const el = document.getElementById('ast-workbench-card');
+      if (el) el.classList.toggle('hidden');
+    }
+    async function triggerAppControl(action, msg) {
+      toggleGeminiDrawer(false);
+      await NorykaBackend.request('/api/app-control', { method: 'POST', body: JSON.stringify({ action }) });
+      showToast(msg || 'انجام شد.', 'success');
+    }
     function switchTab(tabId) {
       state.activeTab = tabId;
-      const tabs = ['overview', 'chat', 'gateways', 'providers', 'automation', 'deploy'];
+      toggleGeminiDrawer(false);
+      const tabs = ['overview', 'health', 'chat', 'gateways', 'providers', 'automation', 'deploy'];
       tabs.forEach(t => {
         const view = document.getElementById('view-' + t);
         const btn = document.getElementById('tab-btn-' + t);
+        if (!view || !btn) return;
         if (t === tabId) {
           view.classList.remove('hidden');
-          btn.className = 'tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30';
+          btn.className = 'tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold bg-indigo-600 text-white flex items-center gap-2.5';
         } else {
           view.classList.add('hidden');
-          btn.className = 'tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all text-slate-300 hover:bg-slate-800/80';
+          btn.className = 'tab-btn w-full text-right px-3.5 py-2.5 rounded-2xl text-xs font-semibold text-slate-300 hover:bg-slate-900 flex items-center gap-2.5';
         }
       });
-      if (tabId === 'deploy') {
-        regenerateConfigPreview();
-      }
+      if (tabId === 'deploy') regenerateConfigPreview();
+      if (tabId === 'health' && typeof refreshDeviceHealthRadar === 'function') refreshDeviceHealthRadar(false);
     }
-
     function toggleTheme() {
       const htmlEl = document.documentElement;
       htmlEl.classList.toggle('dark');
