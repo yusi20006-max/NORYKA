@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[https://raw.githubusercontent.com/yusi20006-max/NORYKA/mainhttps://raw.githubusercontent.com/yusi20006-max/NORYKA/main/docs/images/2.jpg]
+[https://raw.githubusercontent.com/yusi20006-max/NORYKA/mainhttps://cdn.jsdelivr.net/gh/yusi20006-max/NORYKA@main/https://cdn.jsdelivr.net/gh/yusi20006-max/NORYKA@main/docs/images/2.jpg]
 
 **An open-source, multi-platform autonomous AI agent and personal intelligence core.**  
 *Native Bale Messenger (`tapi.bale.ai`) & Telegram gateways · Auto-Vision routing · Jalali Calendar & Market Radar · Android Termux Companion App*
@@ -24,14 +24,14 @@
 <table align="center">
 <tr>
 <td width="50%" align="center">
-<img src="https://raw.githubusercontent.com/yusi20006-max/NORYKA/mainhttps://raw.githubusercontent.com/yusi20006-max/NORYKA/main/docs/images/1.jpg" width="220" alt="Noryka Nova Star Avatar" style="border-radius: 24px; box-shadow: 0 8px 32px rgba(0,245,255,0.25);" />
+<img src="https://raw.githubusercontent.com/yusi20006-max/NORYKA/mainhttps://cdn.jsdelivr.net/gh/yusi20006-max/NORYKA@main/https://cdn.jsdelivr.net/gh/yusi20006-max/NORYKA@main/docs/images/1.jpg" width="220" alt="Noryka Nova Star Avatar" style="border-radius: 24px; box-shadow: 0 8px 32px rgba(0,245,255,0.25);" />
 <br />
 <b>✦ Nova Star Emblem (نشان ستاره قطبی نُوا)</b>
 <br />
 <i>Official Bot Avatar & Android App Icon</i>
 </td>
 <td width="50%" align="center">
-<img src="https://raw.githubusercontent.com/yusi20006-max/NORYKA/mainhttps://raw.githubusercontent.com/yusi20006-max/NORYKA/main/docs/images/2.jpg" width="340" alt="Noryka Neon Cyberpunk Splash Screen" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(168,85,247,0.25);" />
+<img src="https://raw.githubusercontent.com/yusi20006-max/NORYKA/mainhttps://cdn.jsdelivr.net/gh/yusi20006-max/NORYKA@main/https://cdn.jsdelivr.net/gh/yusi20006-max/NORYKA@main/docs/images/2.jpg" width="340" alt="Noryka Neon Cyberpunk Splash Screen" style="border-radius: 16px; box-shadow: 0 8px 32px rgba(168,85,247,0.25);" />
 <br />
 <b>🚀 Neon Cyberpunk Splash Screen</b>
 <br />
