@@ -939,7 +939,7 @@ def _play_noryka_splash() -> None:
         ]
         top_pad = max(1, (rows - 14) // 2)
         bar_w = min(26, max(16, cols - 12))
-        sub = "INITIALIZING AUTONOMOUS CORE v3.2..."
+        sub = "INITIALIZING AUTONOMOUS CORE v3.3..."
         out.write("\033[2J\033[H\033[?25l")
         out.flush()
         steps = 25
@@ -983,11 +983,11 @@ def _build_compact_banner() -> str:
     _play_noryka_splash()
     w = min(shutil.get_terminal_size((42, 24)).columns - 2, 88)
     if w < 30:
-        return "\n[bold #00F5FF]✦ NORYKA[/] [dim #A855F7]- Autonomous Core v3.2[/]\n"
+        return "\n[bold #00F5FF]✦ NORYKA[/] [dim #A855F7]- Autonomous Core v3.3[/]\n"
     bar = "═" * w
     right_w = max(10, (w - 2) - 7)
     r1 = "✦ NORYKA - AI Agent Framework"[:right_w].ljust(right_w)
-    r2 = "Noryka Autonomous Core v3.2.0"[:right_w].ljust(right_w)
+    r2 = "Noryka Autonomous Core v3.3.0"[:right_w].ljust(right_w)
     r3 = "Engine: Active · Mode: Direct"[:right_w].ljust(right_w)
     return (
         f"\n[bold #00F5FF]╔{bar}╗[/]\n"

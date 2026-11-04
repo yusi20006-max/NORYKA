@@ -306,7 +306,7 @@ def get_version_info() -> VersionInfo:
 
     # 3. Unknown — no stamp, no git
     if info is None:
-        info = VersionInfo("3.2.0", "3.2.0", None, None, None, "fallback")
+        info = VersionInfo("3.3.0", "3.3.0", None, None, None, "fallback")
 
     _cached_version_info = info
     return info

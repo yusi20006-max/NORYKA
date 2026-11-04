@@ -266,15 +266,19 @@ class BaleAdapter(BasePlatformAdapter):
                     {"text": "💳 حسابداری (/expense)", "callback_data": "cmd:/expense"},
                 ],
                 [
-                    {"text": "🔄 نشست جدید (/new)", "callback_data": "cmd:/new"},
+                    {"text": "📚 مغز دوم و اسناد (/doc)", "callback_data": "cmd:/doc"},
+                    {"text": "🎭 پرسونای دستیار (/persona)", "callback_data": "cmd:/persona"},
+                ],
+                [
+                    {"text": "📥 اینباکس ارتباطات (/inbox)", "callback_data": "cmd:/inbox"},
                     {"text": "📊 وضعیت هسته (/status)", "callback_data": "cmd:/status"},
                 ],
                 [
+                    {"text": "🔄 نشست جدید (/new)", "callback_data": "cmd:/new"},
                     {"text": "🧠 انتخاب مدل (/model)", "callback_data": "cmd:/model"},
-                    {"text": "✦ درباره نوریکا (/about)", "callback_data": "cmd:/about"},
                 ],
                 [
-                    {"text": "🆔 شناسه چت/کانال (/id)", "callback_data": "cmd:/id"},
+                    {"text": "✦ درباره نوریکا (/about)", "callback_data": "cmd:/about"},
                     {"text": "⏹ توقف اجرا (/stop)", "callback_data": "cmd:/stop"},
                 ],
             ]
@@ -316,7 +320,7 @@ class BaleAdapter(BasePlatformAdapter):
         if first_word in {"/panel", "/menu", "/start"}:
             surface_fa = "کانال بله" if chat_type == "channel" else ("گروه بله" if chat_type == "group" else "چت خصوصی بله")
             text = (
-                "⟐ ✦ ⟐  *NORYKA · هسته هوشمند خودگردان (v3.2.0)*\n"
+                "⟐ ✦ ⟐  *NORYKA · هسته هوشمند خودگردان (v3.3.0)*\n"
                 f"📍 بستر فعال: {surface_fa}\n\n"
                 "🎛 *پنل دکمه‌های شیشه‌ای نوریکا فعال است!*\n"
                 "روی هر یک از دکمه‌های شیشه‌ای زیر ضربه بزنید (یا هر زمان کلمه `پنل` را بفرستید):"
@@ -347,11 +351,22 @@ class BaleAdapter(BasePlatformAdapter):
             asyncio.create_task(self._schedule_bale_reminder(chat_id, sec, h_dur, note))
             await self.send(chat_id, f"✅ یادآور ثبت شد! تا *{h_dur}* دیگر درباره «*{note}*» اطلاع می‌دهم.", reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
             return True
+        if first_word == "/doc":
+            await self.send(chat_id, search_document_vault(arg_rest), reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
+            return True
+        if first_word == "/persona":
+            t, m = format_persona_card(arg_rest)
+            await self.send(chat_id, t, reply_to=reply_to_id, metadata={"reply_markup": m or panel_markup})
+            return True
+        if first_word == "/inbox":
+            t, m = format_inbox_card(arg_rest)
+            await self.send(chat_id, t, reply_to=reply_to_id, metadata={"reply_markup": m or panel_markup})
+            return True
         if first_word == "/about":
             text = (
                 "╔══════════════════════════════╗\n"
                 "   ⟐    ✦ *NORYKA · Autonomous Core*\n"
-                " ⟐ ✦ ⟐  *نسخه:* v3.2.0 (Nova Star)\n"
+                " ⟐ ✦ ⟐  *نسخه:* v3.3.0 (Nova Star)\n"
                 "   ⟐    *موتور:* Multi-Provider + Vision\n"
                 "╚══════════════════════════════╝\n\n"
                 "• تقویم شمسی، لیست کارها و یادآور هوشمند (`/today`, `/todo`, `/remind`)\n"

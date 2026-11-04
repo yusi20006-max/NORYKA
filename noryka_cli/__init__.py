@@ -2,7 +2,7 @@
 
 import sys
 
-__release_date__ = "2026.11.02"
+__release_date__ = "2026.11.05"
 # Declared for type checkers and the old-updater surface audit; served lazily by __getattr__.
 __version__: str
 
@@ -33,10 +33,10 @@ def __getattr__(name: str) -> str:
         from pathlib import Path
         try:
             stamp = json.loads((Path(__file__).resolve().parents[1] / "install-stamp.json").read_text(encoding="utf-8-sig"))
-            return str(stamp.get("baseVersion") or "3.2.0")
+            return str(stamp.get("baseVersion") or "3.3.0")
         except (OSError, ValueError, AttributeError):
-            return "3.2.0"
-    return str(read_install_stamp(repo_root()).get("baseVersion") or "3.2.0")
+            return "3.3.0"
+    return str(read_install_stamp(repo_root()).get("baseVersion") or "3.3.0")
 
 
 def _ensure_utf8() -> bool:
