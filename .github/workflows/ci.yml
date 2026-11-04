@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: noryka-ci-${{ github.sha }}
@@ -34,17 +34,12 @@ jobs:
           version: "0.13.5"
           enable-cache: true
       - id: resolve
-        name: Check or generate the dependency lock
+        name: Validate the committed dependency lock
         shell: bash
         run: |
           set -euo pipefail
-          changed=false
-          if ! uv lock --check; then
-            uv lock
-            changed=true
-          fi
           uv lock --check
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "changed=false" >> "$GITHUB_OUTPUT"
       - name: Preserve the resolved lock for the test matrix
         if: always()
         uses: actions/upload-artifact@v4
@@ -53,22 +48,6 @@ jobs:
           path: uv.lock
           if-no-files-found: error
           retention-days: 3
-      - name: Commit the generated lock on the hardening branch
-        if: steps.resolve.outputs.changed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          branch="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if [[ "$branch" == release/* ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add uv.lock
-            git commit -m "build: add resolved Python dependency lock"
-            git push origin "HEAD:$branch"
-          else
-            echo "Lockfile changed; it will not be pushed to the protected default branch."
-          fi
-
   tests:
     name: Python ${{ matrix.python-version }} tests
     needs: resolve-lock
