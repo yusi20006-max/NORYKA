@@ -1,0 +1,50 @@
+name: Build Noryka Android Companion APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Noryka Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build Noryka Companion APK
+        working-directory: ./android
+        run: gradle assembleDebug --no-daemon
+
+      - name: Prepare Noryka.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Noryka.apk
+
+      - name: Upload Noryka.apk Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Noryka-Android-Companion-APK
+          path: Noryka.apk
+
+      - name: Publish Noryka.apk to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v3.2.0
+          name: "Noryka v3.2.0 — Android Companion & Autonomous Core"
+          files: Noryka.apk

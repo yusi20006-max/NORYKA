@@ -3388,6 +3388,13 @@ def _build_cli_parser():
     build_gui_parser(subparsers, cmd_gui=cmd_gui)
     build_logs_parser(subparsers, cmd_logs=cmd_logs)
     build_prompt_size_parser(subparsers, cmd_prompt_size=cmd_prompt_size)
+    app_parser = subparsers.add_parser("app", help="Control Noryka Android Companion & background engine")
+    app_parser.add_argument("app_action", nargs="?", default="open", choices=["open", "start", "stop", "restart", "status", "panel", "clean"])
+    app_parser.add_argument("--port", type=int, default=8080)
+    def _cmd_app(args):
+        from noryka_cli.app_cmd import cmd_app
+        return cmd_app(args)
+    app_parser.set_defaults(func=_cmd_app)
     return parser, subparsers
 
 
