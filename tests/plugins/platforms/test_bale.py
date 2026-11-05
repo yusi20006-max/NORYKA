@@ -73,6 +73,13 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         }, 10)
         self.adapter.handle_message.assert_awaited_once()
 
+    def test_adapter_rejects_untrusted_api_base_during_construction(self):
+        config = PlatformConfig(
+            enabled=True, token=TEST_TOKEN, extra={"api_base_url": "https://evil.example/bot"}
+        )
+        with self.assertRaises(ValueError):
+            BaleAdapter(config)
+
     def test_gw10_api_base_validation(self):
         self.assertEqual(
             validate_bale_api_base("https://tapi.bale.ai/bot"),
