@@ -761,13 +761,6 @@ def _audited_is_user_authorized(
         return False
 
     extra = getattr(self.config, "extra", None) or {}
-    if (
-        extra.get("allow_all_users") is True
-        or os.getenv("BALE_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
-        or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
-    ):
-        return True
-
     raw_users = extra.get("allowed_users") or os.getenv("BALE_ALLOWED_USERS", "")
     if isinstance(raw_users, (list, tuple, set)):
         allowed_users = {str(x).strip() for x in raw_users if str(x).strip()}
@@ -780,8 +773,17 @@ def _audited_is_user_authorized(
     else:
         allowed_groups = {x.strip() for x in str(raw_groups).split(",") if x.strip()}
 
+    # Sensitive/admin actions always require an explicit personal allowlist entry;
+    # the broad allow-all switch only applies to ordinary conversational access.
     if require_personal_auth:
         return uid in allowed_users
+
+    if (
+        extra.get("allow_all_users") is True
+        or os.getenv("BALE_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+        or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+    ):
+        return True
 
     if uid in allowed_users:
         return True
