@@ -53,6 +53,7 @@ BALE_MAX_MESSAGE_LEN = 4096
 _BALE_ENV_TABLE = (
     ("BALE_BOT_TOKEN", "token", str),
     ("BALE_ALLOWED_USERS", "allowed_users", str),
+    ("BALE_ALLOWED_GROUPS", "allowed_groups", str),
     ("BALE_ALLOW_ALL_USERS", "allow_all_users", bool),
     ("BALE_HOME_CHANNEL", "home_channel", str),
     ("BALE_API_BASE_URL", "api_base_url", str),
@@ -62,6 +63,7 @@ _BALE_ENV_TABLE = (
 _BALE_YAML_TABLE = (
     ("token", "BALE_BOT_TOKEN", "secret"),
     ("allowed_users", "BALE_ALLOWED_USERS", "csv"),
+    ("allowed_groups", "BALE_ALLOWED_GROUPS", "csv"),
     ("allow_all_users", "BALE_ALLOW_ALL_USERS", "bool"),
     ("home_channel", "BALE_HOME_CHANNEL", "str"),
     ("api_base_url", "BALE_API_BASE_URL", "str"),
@@ -604,7 +606,7 @@ async def _standalone_send(target: str, text: str, **kwargs: Any) -> Dict[str, A
         if data.get("ok"):
             mid = str((data.get("result") or {}).get("message_id") or "")
             return {"success": True, "message_id": mid}
-        return {"success": False, "error": str(data.get("description") or data)}
+        return {"success": False, "error": _redact_bale_secret(data.get("description") or data, token)}
 
 
 def _env_enablement() -> Optional[dict]:
