@@ -164,18 +164,24 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(token, self.adapter._approval_token_map)
 
     async def test_gw11_streamed_download_enforces_incremental_limit(self):
-        import gateway.platforms.base as platform_base
+        class ChunkedBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"123"
+                yield b"456"
+
+            async def aclose(self):
+                return None
 
         def handler(request):
             if request.url.path.endswith("/getFile"):
                 return httpx.Response(200, json={"ok": True, "result": {"file_path": "media.bin"}})
-            return httpx.Response(200, content=b"12345")
+            return httpx.Response(200, stream=ChunkedBody())
 
         self.adapter._client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler), base_url="https://tapi.bale.ai"
         )
         try:
-            with patch.object(platform_base, "get_inbound_media_max_bytes", return_value=4):
+            with patch("plugins.platforms.bale.adapter._MAX_MEDIA_BYTES", 4):
                 with patch("plugins.platforms.bale.adapter.cache_media_bytes") as cache:
                     result = await self.adapter._download_bale_media("file-id", "application/octet-stream")
             self.assertIsNone(result)
