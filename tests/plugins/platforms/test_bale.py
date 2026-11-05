@@ -80,6 +80,13 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             BaleAdapter(config)
 
+    def test_allow_all_never_bypasses_personal_admin_allowlist(self):
+        with patch.dict(os.environ, {"BALE_ALLOW_ALL_USERS": "true"}):
+            self.assertTrue(self.adapter._is_user_authorized("9999", "9001", is_group=True))
+            self.assertFalse(self.adapter._is_user_authorized(
+                "9999", "9001", is_group=True, require_personal_auth=True
+            ))
+
     async def test_group_allowlist_cannot_execute_admin_commands(self):
         self.adapter.handle_message = AsyncMock()
         self.adapter._extract_media = AsyncMock(return_value=(MessageType.TEXT, [], []))
