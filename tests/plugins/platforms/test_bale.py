@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from gateway.config import PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageType
+from gateway.platforms.base import BasePlatformAdapter, ExecApprovalPrompt, MessageType, SendResult
 from plugins.platforms.bale.adapter import (
     BaleAdapter,
     _redact_bale_secret,
@@ -136,6 +136,38 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.split(":")[1], second.split(":")[1])
         with self.assertRaises(ValueError):
             self.adapter.build_approval_callback_data("request-1", "session-1", "forged")
+
+    async def test_approval_prompt_uses_compact_callback_builder(self):
+        self.adapter.send = AsyncMock(return_value=SendResult(success=True))
+        prompt = ExecApprovalPrompt(
+            chat_id="1001",
+            session_key="session-key-long-enough-to-overflow-if-inlined",
+            text="Approve operation?",
+            actions=[("Approve once", "once", "primary")],
+            command="dangerous-command",
+            description="test",
+            smart_denied=False,
+            request_id="request-prompt-1",
+        )
+        await self.adapter._send_exec_approval_prompt(prompt)
+        markup = self.adapter.send.call_args.kwargs["metadata"]["reply_markup"]
+        callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+        self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+        self.assertIn(callback_data.split(":")[1], self.adapter._approval_token_map)
+
+    async def test_group_allowlist_cannot_execute_admin_callback(self):
+        self.adapter._api_request = AsyncMock(return_value={"ok": True})
+        self.adapter._dispatch_bale_panel_cmd = AsyncMock(return_value=True)
+        await self.adapter._handle_callback_query({
+            "id": "group-admin-callback",
+            "from": {"id": "9999"},
+            "message": {
+                "message_id": 7,
+                "chat": {"id": "9001", "type": "group"},
+            },
+            "data": "cmd:/backup",
+        })
+        self.adapter._dispatch_bale_panel_cmd.assert_not_awaited()
 
     async def test_gw09_callback_resolves_real_central_queue_once(self):
         import tools.approval as approval
