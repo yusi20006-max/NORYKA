@@ -80,6 +80,18 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             BaleAdapter(config)
 
+    async def test_group_allowlist_cannot_execute_admin_commands(self):
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._extract_media = AsyncMock(return_value=(MessageType.TEXT, [], []))
+        await self.adapter._handle_message_update({
+            "chat": {"id": "9001", "type": "group", "title": "Allowed group"},
+            "from": {"id": "9999", "first_name": "Member"},
+            "message_id": 6,
+            "text": "/backup",
+        }, 11)
+        self.adapter.handle_message.assert_not_awaited()
+        self.adapter._extract_media.assert_not_awaited()
+
     def test_gw10_api_base_validation(self):
         self.assertEqual(
             validate_bale_api_base("https://tapi.bale.ai/bot"),
