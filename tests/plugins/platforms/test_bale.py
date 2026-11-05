@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from gateway.config import PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter
+from gateway.platforms.base import BasePlatformAdapter, MessageType
 from plugins.platforms.bale.adapter import (
     BaleAdapter,
     _redact_bale_secret,
@@ -62,7 +62,7 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_message_path_uses_group_allowlist(self):
         self.adapter.handle_message = AsyncMock()
-        self.adapter._extract_media = AsyncMock(return_value=(None, [], []))
+        self.adapter._extract_media = AsyncMock(return_value=(MessageType.TEXT, [], []))
         await self.adapter._handle_message_update({
             "chat": {"id": "9001", "type": "group", "title": "Allowed group"},
             "from": {"id": "9999", "first_name": "Member"},
