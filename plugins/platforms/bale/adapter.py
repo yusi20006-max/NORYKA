@@ -41,7 +41,6 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
-from gateway.platforms.base import _read_httpx_body_with_limit
 from gateway.platforms.media_cache import cache_media_bytes, mime_for_ext
 
 logger = logging.getLogger(__name__)
@@ -170,14 +169,14 @@ class BaleAdapter(BasePlatformAdapter):
                         logger.warning("Bale API 429 on %s; sleeping %.1fs (attempt %d/%d)", method, retry_after, attempt, max_retries)
                         await asyncio.sleep(retry_after)
                         continue
-                    return payload
+                    return _redact_bale_payload(payload, self.token)
 
                 if resp.status_code >= 500 and attempt <= max_retries:
                     delay = jittered_backoff(attempt, base=1.0, cap=15.0)
                     await asyncio.sleep(delay)
                     continue
 
-                return payload
+                return _redact_bale_payload(payload, self.token)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -274,7 +273,7 @@ class BaleAdapter(BasePlatformAdapter):
         try:
             async with self._client.stream("GET", self._file_url(file_path)) as resp:
                 resp.raise_for_status()
-                content = await _read_httpx_body_with_limit(resp, media_type="Bale media")
+                content = await _read_bale_media_stream(resp)
             if not content:
                 return None
             return cache_media_bytes(content, mime, filename_hint=filename_hint, kind_hint=kind_hint)
@@ -659,6 +658,39 @@ _MAX_MEDIA_BYTES = 20 * 1024 * 1024
 def _redact_bale_secret(value: Any, token: str = "") -> str:
     text = str(value)
     return text.replace(token, "[REDACTED]") if token else text
+
+
+def _redact_bale_payload(payload: Dict[str, Any], token: str) -> Dict[str, Any]:
+    """Redact the bot token recursively before API errors can reach logs or callers."""
+    def clean(value):
+        if isinstance(value, str):
+            return _redact_bale_secret(value, token)
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()}
+        return value
+    return clean(payload)
+
+
+async def _read_bale_media_stream(response: httpx.Response) -> bytes:
+    """Buffer Bale media only after enforcing the hard 20 MiB limit per streamed chunk."""
+    declared = response.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > _MAX_MEDIA_BYTES:
+                raise ValueError("Bale media exceeds configured maximum size")
+        except ValueError as exc:
+            if "exceeds" in str(exc):
+                raise
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes(chunk_size=65536):
+        total += len(chunk)
+        if total > _MAX_MEDIA_BYTES:
+            raise ValueError("Bale media exceeds configured maximum size")
+        chunks.append(chunk)
+    return b"".join(chunks)
 _NL = chr(10)
 
 
