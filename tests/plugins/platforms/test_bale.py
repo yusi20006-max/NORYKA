@@ -4,6 +4,8 @@ import logging
 import os
 import threading
 import time
+import tempfile
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -162,6 +164,15 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
             "data": callback,
         })
         self.assertNotIn(token, self.adapter._approval_token_map)
+
+    def test_gw12_document_cache_rejects_path_escape(self):
+        import gateway.platforms.base as platform_base
+
+        with tempfile.TemporaryDirectory() as cache_root:
+            with patch.object(platform_base, "get_document_cache_dir", return_value=Path(cache_root)):
+                stored = Path(platform_base.cache_document_from_bytes(b"safe", "../../outside.txt"))
+            self.assertTrue(stored.resolve().is_relative_to(Path(cache_root).resolve()))
+            self.assertTrue(stored.is_file())
 
     async def test_gw11_streamed_download_enforces_incremental_limit(self):
         class ChunkedBody(httpx.AsyncByteStream):
