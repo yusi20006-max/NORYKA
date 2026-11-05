@@ -6,11 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
@@ -21,9 +19,9 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
+    cache_audio_from_bytes,
     cache_document_from_bytes,
     cache_image_from_bytes,
-    cache_audio_from_bytes,
     validate_inbound_media_size,
 )
 from gateway.platforms.event import MessageEvent, MessageType, SourceInfo
@@ -53,6 +51,7 @@ DEFAULT_BALE_FILE_BASE = "https://tapi.bale.ai/file/bot"
 MAX_CALLBACK_DATA_BYTES = 64
 VALID_APPROVAL_CHOICES: Set[str] = {"once", "session", "always", "deny"}
 MAX_MEDIA_BYTES = 20 * 1024 * 1024  # 20 MB ceiling
+NL = chr(10)
 
 
 def validate_bale_api_base(url: Optional[str], default: str = DEFAULT_BALE_API_BASE) -> str:
@@ -108,9 +107,6 @@ class BaleAdapter(BasePlatformAdapter):
         # GW-08: Ephemeral compact callback token map to avoid 64-byte truncation of session_key
         self._approval_token_map: Dict[str, Tuple[str, str]] = {}
 
-    # ------------------------------------------------------------------
-    # URL Builders (GW-04: Never log token or URLs containing token)
-    # ------------------------------------------------------------------
     def _method_url(self, method: str) -> str:
         return f"{self.api_base}{self.token}/{method}"
 
@@ -118,9 +114,6 @@ class BaleAdapter(BasePlatformAdapter):
         clean_path = file_path.lstrip("/")
         return f"{self.file_base}{self.token}/{clean_path}"
 
-    # ------------------------------------------------------------------
-    # GW-03 & GW-07: Fail-Closed User vs Group Authorization
-    # ------------------------------------------------------------------
     def _get_allowed_users(self) -> Set[str]:
         extra = getattr(self.config, "extra", None) or {}
         raw = extra.get("allowed_users") or os.getenv("BALE_ALLOWED_USERS", "")
@@ -164,7 +157,6 @@ class BaleAdapter(BasePlatformAdapter):
         allowed_users = self._get_allowed_users()
         allowed_groups = self._get_allowed_groups()
 
-        # GW-07: Sensitive actions (like exec approval callbacks) strictly require individual user authorization
         if require_personal_auth:
             return uid in allowed_users
 
@@ -174,12 +166,8 @@ class BaleAdapter(BasePlatformAdapter):
         if is_group and cid and cid in allowed_groups:
             return True
 
-        # Fail-closed when no allowlist matches
         return False
 
-    # ------------------------------------------------------------------
-    # GW-01 & Section 4: Standard Lifecycle Contract (connect / disconnect)
-    # ------------------------------------------------------------------
     async def connect(self) -> bool:
         """GW-01 & Section 4: Idempotent async connect, getMe check, and single polling task."""
         if not self.token:
@@ -204,7 +192,6 @@ class BaleAdapter(BasePlatformAdapter):
                 return False
             self._bot_info = data.get("result") or {}
             bot_username = self._bot_info.get("username", "bale_bot")
-            # GW-04: Never log any part of self.token
             logger.info("BaleAdapter connected successfully as @%s", bot_username)
         except Exception as exc:
             logger.error("BaleAdapter connection failed: %s", type(exc).__name__)
@@ -232,9 +219,6 @@ class BaleAdapter(BasePlatformAdapter):
             self._client = None
         logger.info("BaleAdapter disconnected cleanly.")
 
-    # ------------------------------------------------------------------
-    # GW-01: Outbound Contract (send & get_chat_info)
-    # ------------------------------------------------------------------
     async def send(
         self,
         chat_id: str,
@@ -295,9 +279,6 @@ class BaleAdapter(BasePlatformAdapter):
         with contextlib.suppress(Exception):
             await self._client.post(self._method_url("answerCallbackQuery"), json=payload, timeout=5.0)
 
-    # ------------------------------------------------------------------
-    # Section 4: Reliable Polling Lifecycle with 429 Backoff & Deduplication
-    # ------------------------------------------------------------------
     async def _poll_loop(self) -> None:
         backoff = 1.0
         while self._running:
@@ -354,9 +335,6 @@ class BaleAdapter(BasePlatformAdapter):
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
 
-    # ------------------------------------------------------------------
-    # GW-11 & GW-12: Bounded Streaming Media Download & Safe Caching
-    # ------------------------------------------------------------------
     async def _download_media(self, file_id: str, media_kind: str, filename: str = "") -> Optional[str]:
         if not self._client or not file_id:
             return None
@@ -374,7 +352,6 @@ class BaleAdapter(BasePlatformAdapter):
             if not file_path:
                 return None
 
-            # GW-11: Stream download with strict byte limit
             async with self._client.stream("GET", self._file_url(file_path)) as stream_resp:
                 if stream_resp.status_code != 200:
                     return None
@@ -382,9 +359,8 @@ class BaleAdapter(BasePlatformAdapter):
 
             validate_inbound_media_size(len(raw_bytes), media_kind)
 
-            # GW-12: Sanitize filename against path traversal
-            safe_name = Path(filename or Path(file_path).name or "file.bin").name
-            safe_name = re.sub(r"[-/\]", "_", safe_name) or "file.bin"
+            raw_name = Path(filename or Path(file_path).name or "file.bin").name
+            safe_name = "".join(ch if (ord(ch) >= 32 and ch not in ("/", chr(92))) else "_" for ch in raw_name) or "file.bin"
 
             if media_kind == "image":
                 return cache_image_from_bytes(raw_bytes, safe_name)
@@ -395,9 +371,6 @@ class BaleAdapter(BasePlatformAdapter):
             logger.warning("Bale media download rejected/failed: %s", exc)
             return None
 
-    # ------------------------------------------------------------------
-    # GW-08 & GW-09: Approval Callback Builder & Validator
-    # ------------------------------------------------------------------
     def build_approval_callback_data(self, request_id: str, session_key: str, choice: str) -> str:
         """GW-08 & GW-09: Compact validated callback payload <= 64 bytes."""
         if choice not in VALID_APPROVAL_CHOICES:
@@ -411,9 +384,6 @@ class BaleAdapter(BasePlatformAdapter):
             raise ValueError("Callback data exceeds 64-byte limit")
         return data
 
-    # ------------------------------------------------------------------
-    # Built-in Interactive Menu & Feature Buttons (Bale Super Suite + Fallback/Backup)
-    # ------------------------------------------------------------------
     def _main_menu_markup(self) -> Dict[str, Any]:
         return {
             "inline_keyboard": [
@@ -437,7 +407,6 @@ class BaleAdapter(BasePlatformAdapter):
         norm = cmd.strip()
         lower = norm.lower()
 
-        # Delegate to backup_and_fallback module if available
         try:
             from plugins.platforms.bale import backup_and_fallback as bf
             if lower.startswith("/fallback") and hasattr(bf, "handle_fallback_async"):
@@ -450,32 +419,29 @@ class BaleAdapter(BasePlatformAdapter):
             logger.debug("Optional bale suite handler skipped: %s", exc)
 
         if lower in ("/start", "/help", "/menu", "منو", "شروع"):
-            text = (
-                "🤖 **پنل هوشمند نوریکا (بله)**
-
-"
-                "از طریق دکمه‌های شیشه‌ای زیر می‌توانید مدل‌ها، سلامت API و بک‌آپ سیستم را مدیریت کنید "
-                "یا مستقیماً پیام خود را برای دستیار هوشمند ارسال نمایید:"
-            )
-            await self.send(chat_id, text, metadata={"reply_markup": self._main_menu_markup()})
+            lines = [
+                "🤖 **پنل هوشمند نوریکا (بله)**",
+                "",
+                "از طریق دکمه‌های شیشه‌ای زیر می‌توانید مدل‌ها، سلامت API و بک‌آپ سیستم را مدیریت کنید یا مستقیماً پیام خود را ارسال نمایید:",
+            ]
+            await self.send(chat_id, NL.join(lines), metadata={"reply_markup": self._main_menu_markup()})
             return True
 
         if lower == "/status":
+            lines = [
+                "🟢 **وضعیت نوریکا:** متصل به هسته Agent و آماده پردازش.",
+                "• پلتفرم: Bale (رسمی)",
+                "• امنیت Allowlist: فعال",
+            ]
             await self.send(
                 chat_id,
-                "🟢 **وضعیت نوریکا:** متصل به هسته Agent و آماده پردازش.
-"
-                "• پلتفرم: Bale الرسمية
-• امنیت Allowlist: فعال",
+                NL.join(lines),
                 metadata={"reply_markup": self._main_menu_markup()},
             )
             return True
 
         return False
 
-    # ------------------------------------------------------------------
-    # GW-02, GW-03, GW-07, GW-08, GW-09: Update & Callback Dispatch
-    # ------------------------------------------------------------------
     async def _process_update(self, update: Dict[str, Any]) -> None:
         if "callback_query" in update:
             await self._handle_callback_query(update["callback_query"])
@@ -492,22 +458,17 @@ class BaleAdapter(BasePlatformAdapter):
         user_id = str(sender.get("id") or "").strip()
         msg = cb.get("message") or {}
         chat = msg.get("chat") or {}
-        # Crucial fix for Bale: fallback to user_id when message.chat.id is omitted
         chat_id = str(chat.get("id") or user_id).strip()
         chat_type = str(chat.get("type") or "private").lower()
         is_group = chat_type in ("group", "supergroup", "channel")
 
-        # Non-blocking callback acknowledgement so button spinner stops immediately
         asyncio.create_task(self._safe_answer_callback(cb_id))
 
-        # GW-08: Reject oversized or malformed callback payloads
         if not raw_data or len(raw_data.encode("utf-8")) > MAX_CALLBACK_DATA_BYTES:
             logger.warning("Rejected invalid/oversized Bale callback data.")
             return
 
-        # Handle execution approval callbacks (ea:<req_id>:<choice> or ea:<req_id>:<session_key>:<choice>)
         if raw_data.startswith("ea:"):
-            # GW-07: Sensitive approval requires personal user authorization, not group inheritance
             if not self._is_user_authorized(user_id, chat_id, is_group=is_group, require_personal_auth=True):
                 logger.warning("Unauthorized Bale approval callback attempt by user_id=%s", user_id)
                 return
@@ -526,7 +487,6 @@ class BaleAdapter(BasePlatformAdapter):
                 logger.warning("Malformed approval callback format.")
                 return
 
-            # GW-09: Strict input boundary validation on choice
             if choice not in VALID_APPROVAL_CHOICES:
                 logger.warning("Rejected invalid approval choice: %s", choice)
                 return
@@ -534,7 +494,6 @@ class BaleAdapter(BasePlatformAdapter):
             if not request_id or not session_key:
                 return
 
-            # Pop token to prevent duplicate replay
             self._approval_token_map.pop(request_id, None)
             resolver = getattr(self, "resolve_gateway_approval", None)
             if callable(resolver):
@@ -543,7 +502,6 @@ class BaleAdapter(BasePlatformAdapter):
                     await res
             return
 
-        # Standard command/button callbacks
         if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
             logger.warning("Unauthorized Bale callback from user_id=%s", user_id)
             return
@@ -557,7 +515,6 @@ class BaleAdapter(BasePlatformAdapter):
         if await self._handle_builtin_bale_command(cmd, chat_id, user_id):
             return
 
-        # Forward slash commands (like /new, /stop, etc.) through standard MessageEvent -> handle_message
         event = MessageEvent(
             text=cmd,
             message_type=MessageType.COMMAND if hasattr(MessageType, "COMMAND") else MessageType.TEXT,
@@ -580,7 +537,6 @@ class BaleAdapter(BasePlatformAdapter):
         chat_type = str(chat.get("type") or "private").lower()
         is_group = chat_type in ("group", "supergroup", "channel")
 
-        # GW-03 & GW-07: Fail-closed authorization before any media download or agent dispatch
         if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
             logger.warning("Denied unauthorized Bale message from user_id=%s chat_id=%s", user_id, chat_id)
             return
@@ -595,7 +551,6 @@ class BaleAdapter(BasePlatformAdapter):
         media_urls: List[str] = []
         media_types: List[str] = []
 
-        # GW-11: Bounded media handling for photo, audio, voice, video, document
         if "photo" in msg and isinstance(msg["photo"], list) and msg["photo"]:
             largest = msg["photo"][-1]
             cached = await self._download_media(largest.get("file_id", ""), "image", "photo.jpg")
@@ -617,7 +572,6 @@ class BaleAdapter(BasePlatformAdapter):
                     media_urls.append(cached)
                     media_types.append(item.get("mime_type") or mtype)
 
-        # GW-02: Deliver to central Gateway Agent runtime via MessageEvent & handle_message
         is_cmd = text.startswith("/")
         m_type = (
             MessageType.COMMAND

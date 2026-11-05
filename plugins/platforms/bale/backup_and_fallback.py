@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import tarfile
 import time
@@ -11,6 +10,7 @@ from typing import Any, Dict, List
 
 NORYKA_HOME = Path.home() / ".noryka"
 BACKUP_DIR = NORYKA_HOME / "backups"
+NL = chr(10)
 
 AVAILABLE_MODELS: List[Dict[str, str]] = [
     {"id": "gemini-2.5-flash", "label": "⚡ Gemini 2.5 Flash (سریع و اقتصادی)", "env": "GEMINI_API_KEY"},
@@ -56,15 +56,13 @@ async def handle_models_async(adapter: Any, chat_id: str, cmd: str) -> bool:
         buttons.append([{"text": f"{prefix}{m['label']}", "callback_data": f"cmd:/models:{m['id']}"}])
     buttons.append([{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "cmd:/start"}])
 
-    text = (
-        f"🧠 **مدیریت و تعویض مدل هوش مصنوعی**
-
-"
-        f"• مدل فعال کنونی: `{current_model}`
-"
-        f"برای تغییر فوری مدل، روی یکی از دکمه‌های شیشه‌ای زیر بزنید:"
-    )
-    await adapter.send(chat_id, text, metadata={"reply_markup": {"inline_keyboard": buttons}})
+    lines = [
+        "🧠 **مدیریت و تعویض مدل هوش مصنوعی**",
+        "",
+        f"• مدل فعال کنونی: `{current_model}`",
+        "برای تغییر فوری مدل، روی یکی از دکمه‌های شیشه‌ای زیر بزنید:",
+    ]
+    await adapter.send(chat_id, NL.join(lines), metadata={"reply_markup": {"inline_keyboard": buttons}})
     return True
 
 
@@ -83,11 +81,11 @@ async def handle_fallback_async(adapter: Any, chat_id: str, cmd: str) -> bool:
     statuses = _check_provider_health()
     current = os.getenv("NORYKA_MODEL", "gemini-2.5-flash")
     lines = [
-        "🛡️ **وضعیت سلامت APIها و زنجیره فال‌بک (Fallback)**
-",
+        "🛡️ **وضعیت سلامت APIها و زنجیره فال‌بک (Fallback)**",
+        "",
         f"• مدل در حال استفاده: `{current}`",
-        "• عملکرد فال‌بک: در صورت خطای 429 (اتمام سهمیه) یا قطعی، سیستم خودکار به کلید/مدل سالم بعدی سوئیچ می‌کند.
-",
+        "• عملکرد فال‌بک: در صورت خطای 429 یا قطعی، سیستم خودکار به کلید سالم بعدی سوئیچ می‌کند.",
+        "",
         "**لیست پروایدرها و وضعیت سلامت:**",
     ]
     buttons = []
@@ -100,8 +98,7 @@ async def handle_fallback_async(adapter: Any, chat_id: str, cmd: str) -> bool:
 
     await adapter.send(
         chat_id,
-        "
-".join(lines),
+        NL.join(lines),
         metadata={"reply_markup": {"inline_keyboard": buttons}},
     )
     return True
@@ -120,18 +117,20 @@ async def handle_backup_async(adapter: Any, chat_id: str, cmd: str) -> bool:
         try:
             with tarfile.open(latest, "r:gz") as tar:
                 tar.extractall(path=NORYKA_HOME)
+            lines = [
+                "♻️ **بازیابی با موفقیت انجام شد!**",
+                f"• فایل: `{latest.name}`",
+                "• تنظیمات، متغیرها و کرون‌جاب‌ها بازگردانی شدند.",
+            ]
             await adapter.send(
                 chat_id,
-                f"♻️ **بازیابی با موفقیت انجام شد!**
-• فایل: `{latest.name}`
-• تنظیمات، متغیرها و کرون‌جاب‌ها بازگردانی شدند.",
+                NL.join(lines),
                 metadata={"reply_markup": adapter._main_menu_markup()},
             )
         except Exception as exc:
             await adapter.send(chat_id, f"❌ خطا در بازیابی بک‌آپ: {exc}")
         return True
 
-    # Create lightweight backup of configs, env, cron jobs
     ts = time.strftime("%Y%m%d_%H%M%S")
     archive_path = BACKUP_DIR / f"noryka_backup_{ts}.tar.gz"
     included = []
@@ -143,15 +142,15 @@ async def handle_backup_async(adapter: Any, chat_id: str, cmd: str) -> bool:
                     tar.add(candidate, arcname=item_name)
                     included.append(item_name)
         size_kb = archive_path.stat().st_size / 1024.0
+        lines = [
+            "💾 **بک‌آپ فشرده با موفقیت ساخته شد!**",
+            f"• نام فایل: `{archive_path.name}`",
+            f"• حجم: `{size_kb:.1f} KB`",
+            f"• بخش‌های ذخیره شده: `{', '.join(included) or 'تنظیمات پایه'}`",
+        ]
         await adapter.send(
             chat_id,
-            f"💾 **بک‌آپ فشرده با موفقیت ساخته شد!**
-"
-            f"• نام فایل: `{archive_path.name}`
-"
-            f"• حجم: `{size_kb:.1f} KB`
-"
-            f"• بخش‌های ذخیره شده: `{', '.join(included) or 'تنظیمات پایه'}`",
+            NL.join(lines),
             metadata={"reply_markup": adapter._main_menu_markup()},
         )
     except Exception as exc:
