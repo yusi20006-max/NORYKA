@@ -1,223 +1,451 @@
-"""Bale platform adapter for Noryka Gateway.
-Compliant with BasePlatformAdapter contract and Security Audit GW-01..GW-12.
+"""Bale Messenger (پیام‌رسان بله) full production platform adapter for Noryka Gateway.
+
+Implements BasePlatformAdapter over Bale's Bot API (https://tapi.bale.ai/bot<token>/<method>):
+- First-class Platform.BALE enum identity (no collision with Telegram sessions/allowlists)
+- Fail-Closed authorization check (BALE_ALLOWED_USERS / BALE_ALLOW_ALL_USERS)
+- Exponential backoff on polling errors and explicit HTTP 429 retry_after handling
+- Inbound & outbound media support (photo, document, voice, audio, video, sticker) via media_cache
+- Interactive inline keyboard buttons for exec approvals (callback_query -> resolve_gateway_approval)
+- Stream edit throttling (default 2.0s) tailored to Bale Bot API rate limits
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import html as _html
+import json
 import logging
 import os
-import re
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from agent.retry_utils import jittered_backoff
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms._shared import (
+    apply_yaml_bridge,
+    env_is_connected,
+    extra_or_secret,
+    get_scoped_secret,
+    platform_gate_env,
+    seed_extra_from_env,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
+    ExecApprovalPrompt,
+    MessageEvent,
+    MessageType,
     SendResult,
-    cache_audio_from_bytes,
-    cache_document_from_bytes,
-    cache_image_from_bytes,
-    validate_inbound_media_size,
 )
-from gateway.platforms.event import MessageEvent, MessageType, SourceInfo
-
-try:
-    from gateway.platforms.base import _read_httpx_body_with_limit
-except ImportError:
-    async def _read_httpx_body_with_limit(resp: httpx.Response, max_bytes: int) -> bytes:
-        content_len = resp.headers.get("Content-Length")
-        if content_len and int(content_len) > max_bytes:
-            raise ValueError(f"Media exceeds maximum allowed size ({max_bytes} bytes)")
-        chunks = []
-        total = 0
-        async for chunk in resp.aiter_bytes(chunk_size=65536):
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"Media stream exceeded maximum size ({max_bytes} bytes)")
-            chunks.append(chunk)
-        return b"".join(chunks)
+from gateway.platforms.media_cache import cache_media_bytes, mime_for_ext
 
 logger = logging.getLogger(__name__)
 
-# GW-10: Official allowlisted Bale API hosts (HTTPS only)
-ALLOWED_BALE_HOSTS: Set[str] = {"tapi.bale.ai"}
-DEFAULT_BALE_API_BASE = "https://tapi.bale.ai/bot"
-DEFAULT_BALE_FILE_BASE = "https://tapi.bale.ai/file/bot"
-MAX_CALLBACK_DATA_BYTES = 64
-VALID_APPROVAL_CHOICES: Set[str] = {"once", "session", "always", "deny"}
-MAX_MEDIA_BYTES = 20 * 1024 * 1024  # 20 MB ceiling
-NL = chr(10)
+BALE_DEFAULT_API_BASE = "https://tapi.bale.ai/bot"
+BALE_DEFAULT_FILE_BASE = "https://tapi.bale.ai/file/bot"
+BALE_STREAM_EDIT_THROTTLE_SECONDS = 2.0
+BALE_MAX_MESSAGE_LEN = 4096
+
+_BALE_ENV_TABLE = (
+    ("BALE_BOT_TOKEN", "token", str),
+    ("BALE_ALLOWED_USERS", "allowed_users", str),
+    ("BALE_ALLOW_ALL_USERS", "allow_all_users", bool),
+    ("BALE_HOME_CHANNEL", "home_channel", str),
+    ("BALE_API_BASE_URL", "api_base_url", str),
+    ("BALE_STREAM_THROTTLE", "stream_edit_throttle_seconds", float),
+)
+
+_BALE_YAML_TABLE = (
+    ("token", "BALE_BOT_TOKEN", "secret"),
+    ("allowed_users", "BALE_ALLOWED_USERS", "csv"),
+    ("allow_all_users", "BALE_ALLOW_ALL_USERS", "bool"),
+    ("home_channel", "BALE_HOME_CHANNEL", "str"),
+    ("api_base_url", "BALE_API_BASE_URL", "str"),
+    ("stream_edit_throttle_seconds", "BALE_STREAM_THROTTLE", "float"),
+)
 
 
-def validate_bale_api_base(url: Optional[str], default: str = DEFAULT_BALE_API_BASE) -> str:
-    """GW-10: Validate API base URL is HTTPS and targets an allowlisted Bale host."""
-    raw = (url or "").strip() or default
-    parsed = urlparse(raw)
-    if parsed.scheme != "https":
-        raise ValueError(f"Insecure Bale API scheme '{parsed.scheme}'; only 'https' is permitted.")
-    if not parsed.hostname or parsed.hostname.lower() not in ALLOWED_BALE_HOSTS:
-        raise ValueError(f"Untrusted Bale API host '{parsed.hostname}'; allowed: {ALLOWED_BALE_HOSTS}")
-    return raw.rstrip("/")
-
-
-def bale_deps_present() -> bool:
+def check_requirements() -> bool:
+    """httpx is a core dependency; always available."""
     return True
 
 
-def check_bale_requirements() -> bool:
-    return bool(os.getenv("BALE_BOT_TOKEN", "").strip())
+def is_connected(config: Optional[PlatformConfig] = None) -> bool:
+    return env_is_connected("BALE_BOT_TOKEN", config, extra_key="token")
 
 
 class BaleAdapter(BasePlatformAdapter):
-    """Official Noryka Gateway Adapter for Bale Messenger (GW-01..GW-12 compliant)."""
+    """Full-featured Noryka Gateway adapter for Bale Messenger (tapi.bale.ai)."""
 
-    platform = Platform.BALE if hasattr(Platform, "BALE") else "bale"
-    name = "bale"
-
-    def __init__(self, config: Optional[PlatformConfig] = None, **kwargs: Any) -> None:
-        if config is None:
-            config = PlatformConfig(enabled=True, token=os.getenv("BALE_BOT_TOKEN", ""))
-        super().__init__(config, self.platform)
-
-        extra = getattr(config, "extra", None) or {}
-        self.token: str = (
-            getattr(config, "token", None)
-            or extra.get("token")
-            or os.getenv("BALE_BOT_TOKEN")
-            or ""
-        ).strip()
-
-        # GW-10: Strict validation of API base URLs
-        custom_api_base = extra.get("api_base_url") or os.getenv("BALE_API_BASE_URL")
-        custom_file_base = extra.get("file_base_url") or os.getenv("BALE_FILE_BASE_URL")
-        self.api_base: str = validate_bale_api_base(custom_api_base, DEFAULT_BALE_API_BASE)
-        self.file_base: str = validate_bale_api_base(custom_file_base, DEFAULT_BALE_FILE_BASE)
+    def __init__(self, config: PlatformConfig):
+        super().__init__(config, Platform.BALE)
+        extra = getattr(config, "extra", None) if isinstance(getattr(config, "extra", None), dict) else {}
+        self.token: str = getattr(config, "token", None) or extra_or_secret(extra, "token", "BALE_BOT_TOKEN") or ""
+        self.api_base: str = (
+            extra_or_secret(extra, "api_base_url", "BALE_API_BASE_URL") or BALE_DEFAULT_API_BASE
+        ).rstrip("/")
+        self.file_base: str = BALE_DEFAULT_FILE_BASE.rstrip("/")
+        raw_throttle = extra_or_secret(extra, "stream_edit_throttle_seconds", "BALE_STREAM_THROTTLE")
+        try:
+            self.edit_throttle_s: float = max(0.5, float(raw_throttle)) if raw_throttle is not None else BALE_STREAM_EDIT_THROTTLE_SECONDS
+        except (TypeError, ValueError):
+            self.edit_throttle_s = BALE_STREAM_EDIT_THROTTLE_SECONDS
 
         self._client: Optional[httpx.AsyncClient] = None
-        self._poll_task: Optional[asyncio.Task] = None
-        self._running: bool = False
-        self._offset: int = 0
-        self._seen_update_ids: Set[int] = set()
-        self._bot_info: Dict[str, Any] = {}
-        # GW-08: Ephemeral compact callback token map to avoid 64-byte truncation of session_key
-        self._approval_token_map: Dict[str, Tuple[str, str]] = {}
+        self._polling_task: Optional[asyncio.Task] = None
+        self._last_update_id: int = 0
+        self._last_edit_ts: Dict[str, float] = {}
+        self._consecutive_poll_failures: int = 0
+        self._bot_id: Optional[str] = None
+        self._bot_username: Optional[str] = None
 
-    def _method_url(self, method: str) -> str:
+    def _endpoint(self, method: str) -> str:
         return f"{self.api_base}{self.token}/{method}"
 
     def _file_url(self, file_path: str) -> str:
-        clean_path = file_path.lstrip("/")
-        return f"{self.file_base}{self.token}/{clean_path}"
+        return f"{self.file_base}{self.token}/{file_path.lstrip('/')}"
 
-    def _get_allowed_users(self) -> Set[str]:
-        extra = getattr(self.config, "extra", None) or {}
-        raw = extra.get("allowed_users") or os.getenv("BALE_ALLOWED_USERS", "")
-        if isinstance(raw, (list, tuple, set)):
-            return {str(x).strip() for x in raw if str(x).strip()}
-        return {x.strip() for x in str(raw).split(",") if x.strip()}
-
-    def _get_allowed_groups(self) -> Set[str]:
-        extra = getattr(self.config, "extra", None) or {}
-        raw = extra.get("allowed_groups") or os.getenv("BALE_ALLOWED_GROUPS", "")
-        if isinstance(raw, (list, tuple, set)):
-            return {str(x).strip() for x in raw if str(x).strip()}
-        return {x.strip() for x in str(raw).split(",") if x.strip()}
-
-    def _is_allow_all_enabled(self) -> bool:
-        extra = getattr(self.config, "extra", None) or {}
-        if extra.get("allow_all_users") is True:
-            return True
-        return (
-            os.getenv("BALE_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
-            or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+    def _is_user_authorized(self, user_id: Optional[str], chat_id: Optional[str] = None) -> bool:
+        """Fail-closed allowlist check for Bale callers (BALE_ALLOWED_USERS / BALE_ALLOW_ALL_USERS)."""
+        allow_all_raw = platform_gate_env("BALE_ALLOW_ALL_USERS") or str(
+            (self.config.extra or {}).get("allow_all_users", "")
         )
-
-    def _is_user_authorized(
-        self,
-        user_id: Optional[str],
-        chat_id: Optional[str] = None,
-        *,
-        is_group: bool = False,
-        require_personal_auth: bool = False,
-    ) -> bool:
-        """GW-03 & GW-07: Fail-closed authorization separating individual user and group policies."""
+        if str(allow_all_raw).strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+        raw_list = (
+            platform_gate_env("BALE_ALLOWED_USERS")
+            or str((self.config.extra or {}).get("allowed_users", ""))
+            or get_scoped_secret("BALE_ALLOWED_USERS")
+            or ""
+        )
+        allowed = {u.strip() for u in str(raw_list).split(",") if u.strip()}
+        if not allowed:
+            # Fail-closed when no allowlist is configured
+            return False
+        if "*" in allowed:
+            return True
         uid = str(user_id or "").strip()
         cid = str(chat_id or "").strip()
-        if not uid:
-            return False
+        return bool((uid and uid in allowed) or (cid and cid in allowed))
 
-        if self._is_allow_all_enabled():
-            return True
+    async def _api_request(
+        self,
+        method: str,
+        *,
+        json_body: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+    ) -> Dict[str, Any]:
+        """Execute a Bale Bot API call with automatic HTTP 429 retry_after and transient backoff."""
+        if self._client is None:
+            return {"ok": False, "error_code": 503, "description": "Bale HTTP client not initialized"}
 
-        allowed_users = self._get_allowed_users()
-        allowed_groups = self._get_allowed_groups()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                if files is not None:
+                    resp = await self._client.post(self._endpoint(method), data=data or {}, files=files)
+                elif json_body is not None:
+                    resp = await self._client.post(self._endpoint(method), json=json_body)
+                else:
+                    resp = await self._client.get(self._endpoint(method))
 
-        if require_personal_auth:
-            return uid in allowed_users
+                try:
+                    payload = resp.json()
+                except Exception:
+                    payload = {"ok": False, "error_code": resp.status_code, "description": resp.text[:300]}
 
-        if uid in allowed_users:
-            return True
+                if resp.status_code == 429 or payload.get("error_code") == 429:
+                    params = payload.get("parameters") or {}
+                    retry_after = float(params.get("retry_after") or resp.headers.get("Retry-After") or 3.0)
+                    payload["retry_after"] = retry_after
+                    if attempt <= max_retries and retry_after <= 30.0:
+                        logger.warning("Bale API 429 on %s; sleeping %.1fs (attempt %d/%d)", method, retry_after, attempt, max_retries)
+                        await asyncio.sleep(retry_after)
+                        continue
+                    return payload
 
-        if is_group and cid and cid in allowed_groups:
-            return True
+                if resp.status_code >= 500 and attempt <= max_retries:
+                    delay = jittered_backoff(attempt, base=1.0, cap=15.0)
+                    await asyncio.sleep(delay)
+                    continue
 
-        return False
+                return payload
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if attempt <= max_retries:
+                    delay = jittered_backoff(attempt, base=1.0, cap=15.0)
+                    await asyncio.sleep(delay)
+                    continue
+                return {"ok": False, "error_code": 500, "description": str(exc), "retryable": True}
 
-    async def connect(self) -> bool:
-        """GW-01 & Section 4: Idempotent async connect, getMe check, and single polling task."""
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self.token:
             logger.warning("BaleAdapter: BALE_BOT_TOKEN is not configured.")
             return False
-
-        if self._running and self._poll_task and not self._poll_task.done():
-            return True
-
-        if self._client is not None:
-            with contextlib.suppress(Exception):
-                await self._client.aclose()
-
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=10.0))
-        try:
-            resp = await self._client.get(self._method_url("getMe"))
-            data = resp.json() if resp.status_code == 200 else {}
-            if not data.get("ok"):
-                logger.error("BaleAdapter: getMe authentication failed (HTTP %s).", resp.status_code)
-                await self._client.aclose()
-                self._client = None
-                return False
-            self._bot_info = data.get("result") or {}
-            bot_username = self._bot_info.get("username", "bale_bot")
-            logger.info("BaleAdapter connected successfully as @%s", bot_username)
-        except Exception as exc:
-            logger.error("BaleAdapter connection failed: %s", type(exc).__name__)
-            if self._client:
-                await self._client.aclose()
-                self._client = None
+        self._client = httpx.AsyncClient(timeout=35.0)
+        data = await self._api_request("getMe", max_retries=2)
+        if not data.get("ok"):
+            logger.error("BaleAdapter getMe failed: %s", data.get("description") or data)
+            await self._client.aclose()
+            self._client = None
             return False
-
+        bot_info = data.get("result") or {}
+        self._bot_id = str(bot_info.get("id") or "")
+        self._bot_username = str(bot_info.get("username") or "")
+        logger.info("Connected to Bale Messenger as @%s (id=%s)", self._bot_username, self._bot_id)
         self._running = True
-        self._poll_task = asyncio.create_task(self._poll_loop(), name="bale-polling")
+        self._polling_task = asyncio.create_task(self._poll_updates_loop())
         return True
 
     async def disconnect(self) -> None:
-        """GW-01 & Section 4: Cleanly cancel polling task and close HTTP client."""
         self._running = False
-        if self._poll_task is not None:
-            self._poll_task.cancel()
+        if self._polling_task:
+            self._polling_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._poll_task
-            self._poll_task = None
-
-        if self._client is not None:
-            with contextlib.suppress(Exception):
-                await self._client.aclose()
+                await self._polling_task
+            self._polling_task = None
+        if self._client:
+            await self._client.aclose()
             self._client = None
-        logger.info("BaleAdapter disconnected cleanly.")
+
+    async def _poll_updates_loop(self) -> None:
+        """Long-polling loop with exponential backoff on non-OK responses and 429 rate-limit handling."""
+        while getattr(self, "_running", False) and self._client is not None:
+            try:
+                payload = await self._api_request(
+                    "getUpdates",
+                    json_body={"offset": self._last_update_id + 1, "timeout": 20},
+                    max_retries=1,
+                )
+                if not payload.get("ok"):
+                    self._consecutive_poll_failures += 1
+                    retry_after = float(payload.get("retry_after") or 0.0)
+                    delay = max(retry_after, jittered_backoff(self._consecutive_poll_failures, base=1.5, cap=30.0))
+                    logger.warning(
+                        "Bale getUpdates returned ok=False (err=%s); backing off %.1fs",
+                        payload.get("description") or payload.get("error_code"),
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                self._consecutive_poll_failures = 0
+                updates = payload.get("result") or []
+                for upd in updates:
+                    uid = int(upd.get("update_id", 0))
+                    if uid > self._last_update_id:
+                        self._last_update_id = uid
+                    await self._dispatch_update(upd, uid)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self._consecutive_poll_failures += 1
+                delay = jittered_backoff(self._consecutive_poll_failures, base=1.5, cap=30.0)
+                logger.debug("Bale polling error (%s); sleeping %.1fs", exc, delay)
+                await asyncio.sleep(delay)
+
+    async def _dispatch_update(self, upd: Dict[str, Any], update_id: int) -> None:
+        if "callback_query" in upd and upd["callback_query"]:
+            await self._handle_callback_query(upd["callback_query"])
+            return
+        msg = upd.get("message") or upd.get("edited_message")
+        if msg:
+            await self._handle_message_update(msg, update_id)
+
+    async def _download_bale_media(self, file_id: str, mime: str, filename_hint: str = "", kind_hint: Optional[str] = None) -> Optional[str]:
+        """Fetch file metadata via getFile, download bytes from Bale file server, and store in media_cache."""
+        if not self._client or not file_id:
+            return None
+        info = await self._api_request("getFile", json_body={"file_id": file_id}, max_retries=2)
+        if not info.get("ok"):
+            return None
+        file_path = (info.get("result") or {}).get("file_path")
+        if not file_path:
+            return None
+        try:
+            resp = await self._client.get(self._file_url(file_path))
+            if resp.status_code != 200 or not resp.content:
+                return None
+            return cache_media_bytes(resp.content, mime, filename_hint=filename_hint, kind_hint=kind_hint)
+        except Exception as exc:
+            logger.warning("Bale media download failed for %s: %s", file_id, exc)
+            return None
+
+    async def _extract_media(self, msg: Dict[str, Any]) -> Tuple[MessageType, List[str], List[str]]:
+        """Extract photos, documents, voice, audio, video, or stickers from a Bale message."""
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        msg_type = MessageType.TEXT
+
+        if isinstance(msg.get("photo"), list) and msg["photo"]:
+            msg_type = MessageType.PHOTO
+            largest = msg["photo"][-1]
+            fid = largest.get("file_id", "")
+            cached = await self._download_bale_media(fid, "image/jpeg", kind_hint="image")
+            if cached:
+                media_urls.append(cached)
+                media_types.append("image/jpeg")
+        elif isinstance(msg.get("document"), dict):
+            msg_type = MessageType.DOCUMENT
+            doc = msg["document"]
+            fid = doc.get("file_id", "")
+            fname = doc.get("file_name") or "document.bin"
+            mime = doc.get("mime_type") or mime_for_ext(Path(fname).suffix)
+            cached = await self._download_bale_media(fid, mime, filename_hint=fname, kind_hint="document")
+            if cached:
+                media_urls.append(cached)
+                media_types.append(mime)
+        elif isinstance(msg.get("voice"), dict):
+            msg_type = MessageType.VOICE
+            voice = msg["voice"]
+            fid = voice.get("file_id", "")
+            mime = voice.get("mime_type") or "audio/ogg"
+            cached = await self._download_bale_media(fid, mime, kind_hint="audio")
+            if cached:
+                media_urls.append(cached)
+                media_types.append(mime)
+        elif isinstance(msg.get("audio"), dict):
+            msg_type = MessageType.AUDIO
+            aud = msg["audio"]
+            fid = aud.get("file_id", "")
+            fname = aud.get("file_name") or "audio.mp3"
+            mime = aud.get("mime_type") or "audio/mpeg"
+            cached = await self._download_bale_media(fid, mime, filename_hint=fname, kind_hint="audio")
+            if cached:
+                media_urls.append(cached)
+                media_types.append(mime)
+        elif isinstance(msg.get("video"), dict):
+            msg_type = MessageType.VIDEO
+            vid = msg["video"]
+            fid = vid.get("file_id", "")
+            fname = vid.get("file_name") or "video.mp4"
+            mime = vid.get("mime_type") or "video/mp4"
+            cached = await self._download_bale_media(fid, mime, filename_hint=fname, kind_hint="document")
+            if cached:
+                media_urls.append(cached)
+                media_types.append(mime)
+
+        return msg_type, media_urls, media_types
+
+    async def _handle_message_update(self, msg: Dict[str, Any], update_id: int) -> None:
+        chat = msg.get("chat") or {}
+        sender = msg.get("from") or {}
+        chat_id = str(chat.get("id") or "")
+        user_id = str(sender.get("id") or chat_id)
+        if not chat_id:
+            return
+
+        # Fail-closed authorization gate before media download or turn creation
+        if not self._is_user_authorized(user_id, chat_id):
+            logger.warning("BaleAdapter: unauthorized message from user_id=%s in chat_id=%s dropped.", user_id, chat_id)
+            return
+
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        msg_type, media_urls, media_types = await self._extract_media(msg)
+        if not text and not media_urls:
+            return
+        if text.startswith("/"):
+            msg_type = MessageType.COMMAND
+
+        raw_chat_type = str(chat.get("type") or "private").lower()
+        chat_type = "dm" if raw_chat_type == "private" else ("channel" if raw_chat_type == "channel" else "group")
+        user_name = (
+            sender.get("username")
+            or " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")]))
+            or user_id
+        )
+        chat_name = chat.get("title") or user_name
+        message_id = str(msg.get("message_id") or "")
+
+        reply_msg = msg.get("reply_to_message") or {}
+        reply_to_id = str(reply_msg["message_id"]) if reply_msg.get("message_id") else None
+        reply_to_text = reply_msg.get("text") or reply_msg.get("caption")
+
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=chat_name,
+            chat_type=chat_type,
+            user_id=user_id,
+            user_name=user_name,
+            message_id=message_id,
+            is_bot=bool(sender.get("is_bot", False)),
+        )
+
+        event = MessageEvent(
+            text=text,
+            message_type=msg_type,
+            user_id=user_id,
+            user_name=user_name,
+            source=source,
+            raw_message=msg,
+            message_id=message_id,
+            platform_update_id=update_id,
+            media_urls=media_urls,
+            media_types=media_types,
+            reply_to_message_id=reply_to_id,
+            reply_to_text=reply_to_text,
+        )
+        await self.handle_message(event)
+
+    async def _handle_callback_query(self, cb: Dict[str, Any]) -> None:
+        """Handle inline button presses for exec approvals (ea:<request_id>:<session_key>:<choice>)."""
+        cb_id = str(cb.get("id") or "")
+        sender = cb.get("from") or {}
+        msg = cb.get("message") or {}
+        chat = msg.get("chat") or {}
+        user_id = str(sender.get("id") or "")
+        chat_id = str(chat.get("id") or "")
+        data = str(cb.get("data") or "")
+
+        if not self._is_user_authorized(user_id, chat_id):
+            if cb_id:
+                await self._api_request(
+                    "answerCallbackQuery",
+                    json_body={"callback_query_id": cb_id, "text": "Unauthorized caller.", "show_alert": True},
+                )
+            return
+
+        if data.startswith("ea:"):
+            parts = data.split(":", 3)
+            if len(parts) == 4:
+                _, req_id, session_key, choice = parts
+                from tools.approval import resolve_gateway_approval
+                resolved = resolve_gateway_approval(
+                    session_key=session_key,
+                    choice=choice,
+                    request_id=req_id or None,
+                )
+                status_label = f"Approval decision recorded: {choice}" if resolved else "Approval already settled or expired."
+                if cb_id:
+                    await self._api_request(
+                        "answerCallbackQuery",
+                        json_body={"callback_query_id": cb_id, "text": status_label},
+                    )
+                if chat_id and msg.get("message_id"):
+                    orig_text = msg.get("text") or ""
+                    await self.edit_message(
+                        chat_id,
+                        str(msg["message_id"]),
+                        f"{orig_text}\n\n✅ Decision: {choice.upper()} (by {user_id})",
+                        force_final=True,
+                    )
+
+    async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
+        """Send an interactive inline-keyboard approval card on Bale."""
+        buttons_row = []
+        req_id = prompt.request_id or ""
+        for label, choice, _style in prompt.actions:
+            cb_data = f"ea:{req_id}:{prompt.session_key}:{choice}"[:64]
+            buttons_row.append({"text": label, "callback_data": cb_data})
+        reply_markup = {"inline_keyboard": [buttons_row]}
+        return await self.send(prompt.chat_id, prompt.text, metadata={"reply_markup": reply_markup})
 
     async def send(
         self,
@@ -227,406 +455,458 @@ class BaleAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> SendResult:
-        """GW-01: Standard Gateway outbound send method."""
-        target_chat = str(chat_id or "").strip()
-        if not target_chat or not self._client:
-            return SendResult(success=False, error="Missing chat_id or client not connected")
+        if not self._client:
+            return SendResult(success=False, error="Bale client not connected", retryable=True, error_kind="transient")
 
-        payload: Dict[str, Any] = {
-            "chat_id": target_chat,
-            "text": content or "",
-        }
-        if reply_to:
-            payload["reply_to_message_id"] = reply_to
+        text = str(content or "")
+        if not text.strip():
+            return SendResult(success=True, message_id="")
 
+        chunks = [text[i : i + BALE_MAX_MESSAGE_LEN] for i in range(0, len(text), BALE_MAX_MESSAGE_LEN)] or [text]
+        sent_ids: List[str] = []
+        reply_id = reply_to or kwargs.get("reply_to_message_id")
         reply_markup = (metadata or {}).get("reply_markup") or kwargs.get("reply_markup")
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
 
+        for idx, chunk in enumerate(chunks):
+            body: Dict[str, Any] = {"chat_id": chat_id, "text": chunk}
+            if idx == 0 and reply_id:
+                with contextlib.suppress(ValueError):
+                    body["reply_to_message_id"] = int(reply_id)
+            if idx == len(chunks) - 1 and reply_markup:
+                body["reply_markup"] = reply_markup
+
+            data = await self._api_request("sendMessage", json_body=body)
+            if not data.get("ok"):
+                err_code = data.get("error_code")
+                retry_after = data.get("retry_after")
+                kind = "rate_limited" if err_code == 429 else ("forbidden" if err_code == 403 else "unknown")
+                return SendResult(
+                    success=False,
+                    error=str(data.get("description") or data),
+                    raw_response=data,
+                    retryable=bool(err_code == 429 or data.get("retryable")),
+                    retry_after=retry_after,
+                    error_kind=kind,
+                )
+            mid = str((data.get("result") or {}).get("message_id") or "")
+            if mid:
+                sent_ids.append(mid)
+
+        return SendResult(
+            success=True,
+            message_id=sent_ids[-1] if sent_ids else "",
+            continuation_message_ids=tuple(sent_ids[:-1]),
+        )
+
+    async def edit_message(self, chat_id: str, message_id: str, content: str, **kwargs: Any) -> SendResult:
+        if not self._client:
+            return SendResult(success=False, error="Bale client not connected", retryable=True)
+        key = f"{chat_id}:{message_id}"
+        now = time.monotonic()
+        last = self._last_edit_ts.get(key, 0.0)
+        if not kwargs.get("force_final") and (now - last) < self.edit_throttle_s:
+            return SendResult(success=True, message_id=str(message_id))
+        self._last_edit_ts[key] = now
         try:
-            resp = await self._client.post(self._method_url("sendMessage"), json=payload)
-            data = resp.json() if resp.status_code == 200 else {}
-            if data.get("ok"):
-                msg_res = data.get("result") or {}
-                msg_id = str(msg_res.get("message_id", ""))
-                return SendResult(success=True, message_id=msg_id)
-            return SendResult(success=False, error=f"Bale sendMessage failed: HTTP {resp.status_code}")
-        except Exception as exc:
-            logger.error("BaleAdapter send error: %s", type(exc).__name__)
-            return SendResult(success=False, error=str(exc))
+            mid_int = int(message_id)
+        except ValueError:
+            return SendResult(success=False, error=f"Invalid message_id: {message_id}")
+
+        data = await self._api_request(
+            "editMessageText",
+            json_body={"chat_id": chat_id, "message_id": mid_int, "text": str(content or "")[:BALE_MAX_MESSAGE_LEN]},
+        )
+        if data.get("ok"):
+            return SendResult(success=True, message_id=str(message_id), raw_response=data)
+        return SendResult(
+            success=False,
+            error=str(data.get("description") or data),
+            retry_after=data.get("retry_after"),
+            retryable=bool(data.get("error_code") == 429),
+        )
+
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """GW-01: Standard Gateway get_chat_info method."""
-        if not self._client or not chat_id:
-            return {"id": str(chat_id), "type": "unknown"}
-        try:
-            resp = await self._client.post(
-                self._method_url("getChat"), json={"chat_id": str(chat_id)}
+        """Get information about a Bale chat/channel (name and type: dm | group | channel)."""
+        if not self._client:
+            return {"id": str(chat_id), "name": str(chat_id), "type": "dm"}
+        data = await self._api_request("getChat", json_body={"chat_id": chat_id}, max_retries=1)
+        if data.get("ok") and isinstance(data.get("result"), dict):
+            res = data["result"]
+            raw_type = str(res.get("type") or "private").lower()
+            chat_type = "dm" if raw_type == "private" else ("channel" if raw_type == "channel" else "group")
+            name = (
+                res.get("title")
+                or res.get("username")
+                or " ".join(filter(None, [res.get("first_name"), res.get("last_name")]))
+                or str(chat_id)
             )
-            data = resp.json() if resp.status_code == 200 else {}
-            if data.get("ok"):
-                return data.get("result") or {"id": str(chat_id)}
-        except Exception as exc:
-            logger.debug("get_chat_info failed: %s", type(exc).__name__)
-        return {"id": str(chat_id), "type": "private"}
+            return {"id": str(res.get("id") or chat_id), "name": name, "type": chat_type, "chat_type": chat_type}
+        return {"id": str(chat_id), "name": str(chat_id), "type": "dm"}
 
-    async def _safe_answer_callback(self, callback_query_id: str, text: Optional[str] = None) -> None:
-        if not callback_query_id or not self._client:
-            return
-        payload: Dict[str, Any] = {"callback_query_id": str(callback_query_id)}
-        if text:
-            payload["text"] = text
-        with contextlib.suppress(Exception):
-            await self._client.post(self._method_url("answerCallbackQuery"), json=payload, timeout=5.0)
+    async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if self._client:
+            await self._api_request("sendChatAction", json_body={"chat_id": chat_id, "action": "typing"}, max_retries=0)
 
-    async def _poll_loop(self) -> None:
-        backoff = 1.0
-        while self._running:
-            try:
-                if not self._client:
-                    break
-                payload = {"offset": self._offset, "limit": 25, "timeout": 20}
-                resp = await self._client.post(self._method_url("getUpdates"), json=payload)
+    async def _send_media_file(
+        self,
+        method: str,
+        field_name: str,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+    ) -> SendResult:
+        p = Path(file_path)
+        if not p.is_file():
+            return SendResult(success=False, error=f"File not found: {file_path}")
+        data_fields: Dict[str, Any] = {"chat_id": str(chat_id)}
+        if caption:
+            data_fields["caption"] = caption[:1024]
+        mime = mime_for_ext(p.suffix)
+        with p.open("rb") as fh:
+            files = {field_name: (p.name, fh.read(), mime)}
+        res = await self._api_request(method, data=data_fields, files=files)
+        if res.get("ok"):
+            mid = str((res.get("result") or {}).get("message_id") or "")
+            return SendResult(success=True, message_id=mid, raw_response=res)
+        return SendResult(success=False, error=str(res.get("description") or res), retry_after=res.get("retry_after"))
 
-                if resp.status_code == 429:
-                    retry_after = 5.0
-                    with contextlib.suppress(Exception):
-                        retry_after = float(resp.json().get("parameters", {}).get("retry_after", 5.0))
-                    logger.warning("BaleAdapter rate limited (429); backing off for %.1fs", retry_after)
-                    await asyncio.sleep(retry_after)
-                    continue
+    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
+        return await self._send_media_file("sendPhoto", "photo", chat_id, image_path, caption)
 
-                if resp.status_code >= 500:
-                    logger.warning("Bale server error (%d); backing off %.1fs", resp.status_code, backoff)
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2.0, 30.0)
-                    continue
+    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
+        return await self._send_media_file("sendDocument", "document", chat_id, file_path, caption)
 
-                data = resp.json() if resp.status_code == 200 else {}
-                if not data.get("ok"):
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2.0, 30.0)
-                    continue
+    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
+        return await self._send_media_file("sendVoice", "voice", chat_id, audio_path, caption)
 
-                backoff = 1.0
-                updates = data.get("result") or []
-                for upd in updates:
-                    if not self._running:
-                        break
-                    upd_id = upd.get("update_id")
-                    if isinstance(upd_id, int):
-                        if upd_id in self._seen_update_ids:
-                            self._offset = max(self._offset, upd_id + 1)
-                            continue
-                        self._seen_update_ids.add(upd_id)
-                        if len(self._seen_update_ids) > 1000:
-                            oldest = sorted(self._seen_update_ids)[:500]
-                            self._seen_update_ids.difference_update(oldest)
-
-                    await self._process_update(upd)
-
-                    if isinstance(upd_id, int):
-                        self._offset = max(self._offset, upd_id + 1)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning("Bale polling error (%s); retrying in %.1fs", type(exc).__name__, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 30.0)
-
-    async def _download_media(self, file_id: str, media_kind: str, filename: str = "") -> Optional[str]:
-        if not self._client or not file_id:
-            return None
-        try:
-            info_resp = await self._client.post(self._method_url("getFile"), json={"file_id": file_id})
-            info_data = info_resp.json() if info_resp.status_code == 200 else {}
-            if not info_data.get("ok"):
-                return None
-            file_res = info_data.get("result") or {}
-            file_size = file_res.get("file_size")
-            if isinstance(file_size, int) and file_size > MAX_MEDIA_BYTES:
-                logger.warning("Rejected inbound Bale media exceeding size limit (%d bytes)", file_size)
-                return None
-            file_path = file_res.get("file_path") or ""
-            if not file_path:
-                return None
-
-            async with self._client.stream("GET", self._file_url(file_path)) as stream_resp:
-                if stream_resp.status_code != 200:
-                    return None
-                raw_bytes = await _read_httpx_body_with_limit(stream_resp, MAX_MEDIA_BYTES)
-
-            validate_inbound_media_size(len(raw_bytes), media_kind)
-
-            raw_name = Path(filename or Path(file_path).name or "file.bin").name
-            safe_name = "".join(ch if (ord(ch) >= 32 and ch not in ("/", chr(92))) else "_" for ch in raw_name) or "file.bin"
-
-            if media_kind == "image":
-                return cache_image_from_bytes(raw_bytes, safe_name)
-            if media_kind == "audio":
-                return cache_audio_from_bytes(raw_bytes, safe_name)
-            return cache_document_from_bytes(raw_bytes, safe_name)
-        except Exception as exc:
-            logger.warning("Bale media download rejected/failed: %s", exc)
-            return None
-
-    def build_approval_callback_data(self, request_id: str, session_key: str, choice: str) -> str:
-        """GW-08 & GW-09: Compact validated callback payload <= 64 bytes."""
-        if choice not in VALID_APPROVAL_CHOICES:
-            raise ValueError(f"Invalid approval choice: {choice}")
-        req_clean = re.sub(r"[^a-zA-Z0-9_-]", "", str(request_id))[:24]
-        if not req_clean:
-            raise ValueError("Empty request_id")
-        self._approval_token_map[req_clean] = (str(request_id), str(session_key))
-        data = f"ea:{req_clean}:{choice}"
-        if len(data.encode("utf-8")) > MAX_CALLBACK_DATA_BYTES:
-            raise ValueError("Callback data exceeds 64-byte limit")
-        return data
-
-    def _main_menu_markup(self) -> Dict[str, Any]:
-        return {
-            "inline_keyboard": [
-                [{"text": "📊 وضعیت نوریکا", "callback_data": "cmd:/status"}],
-                [
-                    {"text": "🔄 سلامت و تعویض API (Fallback)", "callback_data": "cmd:/fallback"},
-                    {"text": "🧠 انتخاب مدل هوش مصنوعی", "callback_data": "cmd:/models"},
-                ],
-                [
-                    {"text": "💾 بک‌آپ‌گیری فوری", "callback_data": "cmd:/backup"},
-                    {"text": "📂 بازیابی بک‌آپ (Restore)", "callback_data": "cmd:/restore"},
-                ],
-                [
-                    {"text": "🆕 گفتگوی جدید", "callback_data": "cmd:/new"},
-                    {"text": "⏹️ توقف پردازش", "callback_data": "cmd:/stop"},
-                ],
-            ]
-        }
-
-    async def _handle_builtin_bale_command(self, cmd: str, chat_id: str, user_id: str) -> bool:
-        norm = cmd.strip()
-        lower = norm.lower()
-
-        try:
-            from plugins.platforms.bale import backup_and_fallback as bf
-            if lower.startswith("/fallback") and hasattr(bf, "handle_fallback_async"):
-                return await bf.handle_fallback_async(self, chat_id, norm)
-            if (lower.startswith("/backup") or lower.startswith("/restore")) and hasattr(bf, "handle_backup_async"):
-                return await bf.handle_backup_async(self, chat_id, norm)
-            if lower.startswith("/models") and hasattr(bf, "handle_models_async"):
-                return await bf.handle_models_async(self, chat_id, norm)
-        except Exception as exc:
-            logger.debug("Optional bale suite handler skipped: %s", exc)
-
-        if lower in ("/start", "/help", "/menu", "منو", "شروع"):
-            lines = [
-                "🤖 **پنل هوشمند نوریکا (بله)**",
-                "",
-                "از طریق دکمه‌های شیشه‌ای زیر می‌توانید مدل‌ها، سلامت API و بک‌آپ سیستم را مدیریت کنید یا مستقیماً پیام خود را ارسال نمایید:",
-            ]
-            await self.send(chat_id, NL.join(lines), metadata={"reply_markup": self._main_menu_markup()})
-            return True
-
-        if lower == "/status":
-            lines = [
-                "🟢 **وضعیت نوریکا:** متصل به هسته Agent و آماده پردازش.",
-                "• پلتفرم: Bale (رسمی)",
-                "• امنیت Allowlist: فعال",
-            ]
-            await self.send(
-                chat_id,
-                NL.join(lines),
-                metadata={"reply_markup": self._main_menu_markup()},
-            )
-            return True
-
-        return False
-
-    async def _process_update(self, update: Dict[str, Any]) -> None:
-        if "callback_query" in update:
-            await self._handle_callback_query(update["callback_query"])
-            return
-
-        msg = update.get("message") or update.get("edited_message")
-        if isinstance(msg, dict):
-            await self._handle_inbound_message(msg)
-
-    async def _handle_callback_query(self, cb: Dict[str, Any]) -> None:
-        cb_id = str(cb.get("id") or "")
-        raw_data = str(cb.get("data") or "").strip()
-        sender = cb.get("from") or {}
-        user_id = str(sender.get("id") or "").strip()
-        msg = cb.get("message") or {}
-        chat = msg.get("chat") or {}
-        chat_id = str(chat.get("id") or user_id).strip()
-        chat_type = str(chat.get("type") or "private").lower()
-        is_group = chat_type in ("group", "supergroup", "channel")
-
-        asyncio.create_task(self._safe_answer_callback(cb_id))
-
-        if not raw_data or len(raw_data.encode("utf-8")) > MAX_CALLBACK_DATA_BYTES:
-            logger.warning("Rejected invalid/oversized Bale callback data.")
-            return
-
-        if raw_data.startswith("ea:"):
-            if not self._is_user_authorized(user_id, chat_id, is_group=is_group, require_personal_auth=True):
-                logger.warning("Unauthorized Bale approval callback attempt by user_id=%s", user_id)
-                return
-
-            parts = raw_data.split(":")
-            if len(parts) == 3:
-                _, req_token, choice = parts
-                mapped = self._approval_token_map.get(req_token)
-                if not mapped:
-                    logger.warning("Unknown or expired approval request token: %s", req_token)
-                    return
-                request_id, session_key = mapped
-            elif len(parts) == 4:
-                _, request_id, session_key, choice = parts
-            else:
-                logger.warning("Malformed approval callback format.")
-                return
-
-            if choice not in VALID_APPROVAL_CHOICES:
-                logger.warning("Rejected invalid approval choice: %s", choice)
-                return
-
-            if not request_id or not session_key:
-                return
-
-            self._approval_token_map.pop(request_id, None)
-            resolver = getattr(self, "resolve_gateway_approval", None)
-            if callable(resolver):
-                res = resolver(request_id, session_key, choice)
-                if asyncio.iscoroutine(res):
-                    await res
-            return
-
-        if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
-            logger.warning("Unauthorized Bale callback from user_id=%s", user_id)
-            return
-
-        cmd = raw_data
-        if cmd.startswith("cmd:"):
-            cmd = cmd[4:].strip()
-        if not cmd.startswith("/"):
-            cmd = "/" + cmd
-
-        if await self._handle_builtin_bale_command(cmd, chat_id, user_id):
-            return
-
-        event = MessageEvent(
-            text=cmd,
-            message_type=MessageType.COMMAND if hasattr(MessageType, "COMMAND") else MessageType.TEXT,
-            source=SourceInfo(
-                platform=self.platform,
-                chat_id=chat_id,
-                user_id=user_id,
-                user_name=sender.get("username") or sender.get("first_name") or user_id,
-                is_group=is_group,
-            ),
-            raw_message=cb,
-        )
-        await self.handle_message(event)
-
-    async def _handle_inbound_message(self, msg: Dict[str, Any]) -> None:
-        sender = msg.get("from") or {}
-        user_id = str(sender.get("id") or "").strip()
-        chat = msg.get("chat") or {}
-        chat_id = str(chat.get("id") or user_id).strip()
-        chat_type = str(chat.get("type") or "private").lower()
-        is_group = chat_type in ("group", "supergroup", "channel")
-
-        if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
-            logger.warning("Denied unauthorized Bale message from user_id=%s chat_id=%s", user_id, chat_id)
-            return
-
-        text = str(msg.get("text") or msg.get("caption") or "").strip()
-        msg_id = str(msg.get("message_id") or "")
-
-        if text.startswith("/") or text in ("منو", "شروع"):
-            if await self._handle_builtin_bale_command(text, chat_id, user_id):
-                return
-
-        media_urls: List[str] = []
-        media_types: List[str] = []
-
-        if "photo" in msg and isinstance(msg["photo"], list) and msg["photo"]:
-            largest = msg["photo"][-1]
-            cached = await self._download_media(largest.get("file_id", ""), "image", "photo.jpg")
-            if cached:
-                media_urls.append(cached)
-                media_types.append("image/jpeg")
-
-        for kind, mtype, default_name in (
-            ("audio", "audio", "audio.mp3"),
-            ("voice", "audio", "voice.ogg"),
-            ("video", "document", "video.mp4"),
-            ("document", "document", "document.bin"),
-        ):
-            if kind in msg and isinstance(msg[kind], dict):
-                item = msg[kind]
-                fname = item.get("file_name") or default_name
-                cached = await self._download_media(item.get("file_id", ""), mtype, fname)
-                if cached:
-                    media_urls.append(cached)
-                    media_types.append(item.get("mime_type") or mtype)
-
-        is_cmd = text.startswith("/")
-        m_type = (
-            MessageType.COMMAND
-            if (is_cmd and hasattr(MessageType, "COMMAND"))
-            else MessageType.TEXT
-        )
-        event = MessageEvent(
-            text=text,
-            message_type=m_type,
-            source=SourceInfo(
-                platform=self.platform,
-                chat_id=chat_id,
-                user_id=user_id,
-                user_name=sender.get("username") or sender.get("first_name") or user_id,
-                is_group=is_group,
-            ),
-            raw_message=msg,
-            message_id=msg_id,
-            media_urls=media_urls,
-            media_types=media_types,
-        )
-        await self.handle_message(event)
+    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
+        return await self._send_media_file("sendVideo", "video", chat_id, video_path, caption)
 
 
-def _build_adapter(config: Optional[PlatformConfig] = None, **kwargs: Any) -> BaleAdapter:
-    """GW-01: Factory returns unstarted BaleAdapter; Gateway manages connect() lifecycle."""
-    return BaleAdapter(config=config, **kwargs)
+async def _standalone_send(target: str, text: str, **kwargs: Any) -> Dict[str, Any]:
+    """Out-of-process sender for cron jobs delivering to Bale when gateway is not running in-process."""
+    token = get_scoped_secret("BALE_BOT_TOKEN") or os.getenv("BALE_BOT_TOKEN", "")
+    if not token:
+        return {"success": False, "error": "BALE_BOT_TOKEN is not set"}
+    api_base = (get_scoped_secret("BALE_API_BASE_URL") or os.getenv("BALE_API_BASE_URL") or BALE_DEFAULT_API_BASE).rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(f"{api_base}{token}/sendMessage", json={"chat_id": target, "text": text[:BALE_MAX_MESSAGE_LEN]})
+        data = resp.json()
+        if data.get("ok"):
+            mid = str((data.get("result") or {}).get("message_id") or "")
+            return {"success": True, "message_id": mid}
+        return {"success": False, "error": str(data.get("description") or data)}
 
 
-def _standalone_send(target: str, text: str, **kwargs: Any) -> bool:
-    """GW-10: Validated standalone sender for Bale."""
-    token = os.getenv("BALE_BOT_TOKEN", "").strip()
-    if not token or not target:
-        return False
-    api_base = validate_bale_api_base(os.getenv("BALE_API_BASE_URL"), DEFAULT_BALE_API_BASE)
-    url = f"{api_base}{token}/sendMessage"
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, json={"chat_id": str(target), "text": text})
-            return resp.status_code == 200 and bool(resp.json().get("ok"))
-    except Exception:
-        return False
+def _env_enablement() -> Optional[dict]:
+    return seed_extra_from_env(_BALE_ENV_TABLE, home_env="BALE_HOME_CHANNEL")
+
+
+def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> Optional[dict]:
+    return apply_yaml_bridge(platform_cfg, _BALE_YAML_TABLE)
 
 
 def register(ctx: Any) -> None:
-    """Official Noryka Plugin entry point for Bale."""
     ctx.register_platform(
         name="bale",
-        label="Bale",
-        adapter_factory=_build_adapter,
-        check_fn=bale_deps_present,
-        ensure_deps_fn=check_bale_requirements,
+        label="Bale Messenger (بله)",
+        dashboard_description="Connect Noryka to Bale Messenger (پیام‌رسان بله) via tapi.bale.ai.",
+        adapter_factory=BaleAdapter,
+        check_fn=check_requirements,
+        is_connected=is_connected,
         required_env=["BALE_BOT_TOKEN"],
+        install_hint="Included in core (httpx)",
+        env_enablement_fn=_env_enablement,
+        apply_yaml_config_fn=_apply_yaml_config,
+        cron_deliver_env_var="BALE_HOME_CHANNEL",
         standalone_sender_fn=_standalone_send,
-        max_message_length=4096,
-        emoji="💬",
+        allowed_users_env="BALE_ALLOWED_USERS",
+        allow_all_env="BALE_ALLOW_ALL_USERS",
+        max_message_length=BALE_MAX_MESSAGE_LEN,
+        emoji="🟢",
         allow_update_command=True,
+        platform_hint=(
+            "You are communicating with the user on Bale Messenger (پیام‌رسان بله). "
+            "Keep formatting clean and concise; messages are capped at 4096 characters."
+        ),
     )
+
+
+
+# ============================================================================
+# Security Audit Fixes (GW-01..GW-12) & Interactive Button Callback Handler
+# ============================================================================
+import re as _re
+from urllib.parse import urlparse as _urlparse
+
+_ALLOWED_BALE_HOSTS = {"tapi.bale.ai"}
+_VALID_APPROVAL_CHOICES = {"once", "session", "always", "deny"}
+_MAX_CB_BYTES = 64
+_MAX_MEDIA_BYTES = 20 * 1024 * 1024
+_NL = chr(10)
+
+
+def validate_bale_api_base(url: Optional[str], default: str = "https://tapi.bale.ai/bot") -> str:
+    """GW-10: Enforce HTTPS and official allowlisted Bale host."""
+    raw = (url or "").strip() or default
+    parsed = _urlparse(raw)
+    if parsed.scheme != "https":
+        raise ValueError(f"Insecure Bale API scheme '{parsed.scheme}'; only 'https' is allowed.")
+    if not parsed.hostname or parsed.hostname.lower() not in _ALLOWED_BALE_HOSTS:
+        raise ValueError(f"Untrusted Bale API host '{parsed.hostname}'; allowed: {_ALLOWED_BALE_HOSTS}")
+    return raw.rstrip("/")
+
+
+_orig_bale_init = BaleAdapter.__init__
+
+
+def _audited_bale_init(self, config: Optional[PlatformConfig] = None, **kwargs: Any) -> None:
+    if config is None:
+        config = PlatformConfig(enabled=True, token=os.getenv("BALE_BOT_TOKEN", ""))
+    _orig_bale_init(self, config, **kwargs)
+    validate_bale_api_base(getattr(self, "api_base", "https://tapi.bale.ai/bot"))
+    self._approval_token_map: Dict[str, Tuple[str, str]] = {}
+
+
+BaleAdapter.__init__ = _audited_bale_init
+
+
+def _audited_is_user_authorized(
+    self,
+    user_id: Any,
+    chat_id: Any = None,
+    *,
+    is_group: bool = False,
+    require_personal_auth: bool = False,
+) -> bool:
+    """GW-03 & GW-07: Fail-closed authorization separating individual user and group policies."""
+    uid = str(user_id or "").strip()
+    cid = str(chat_id or "").strip()
+    if not uid:
+        return False
+
+    extra = getattr(self.config, "extra", None) or {}
+    if (
+        extra.get("allow_all_users") is True
+        or os.getenv("BALE_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+        or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+    ):
+        return True
+
+    raw_users = extra.get("allowed_users") or os.getenv("BALE_ALLOWED_USERS", "")
+    if isinstance(raw_users, (list, tuple, set)):
+        allowed_users = {str(x).strip() for x in raw_users if str(x).strip()}
+    else:
+        allowed_users = {x.strip() for x in str(raw_users).split(",") if x.strip()}
+
+    raw_groups = extra.get("allowed_groups") or os.getenv("BALE_ALLOWED_GROUPS", "")
+    if isinstance(raw_groups, (list, tuple, set)):
+        allowed_groups = {str(x).strip() for x in raw_groups if str(x).strip()}
+    else:
+        allowed_groups = {x.strip() for x in str(raw_groups).split(",") if x.strip()}
+
+    if require_personal_auth:
+        return uid in allowed_users
+
+    if uid in allowed_users:
+        return True
+
+    if is_group and cid and cid in allowed_groups:
+        return True
+
+    return False
+
+
+BaleAdapter._is_user_authorized = _audited_is_user_authorized
+
+
+def _build_approval_callback_data(self, request_id: str, session_key: str, choice: str) -> str:
+    """GW-08 & GW-09: Compact validated callback payload <= 64 bytes."""
+    if choice not in _VALID_APPROVAL_CHOICES:
+        raise ValueError(f"Invalid approval choice: {choice}")
+    req_clean = _re.sub(r"[^a-zA-Z0-9_-]", "", str(request_id))[:24]
+    if not req_clean:
+        raise ValueError("Empty request_id")
+    if not hasattr(self, "_approval_token_map"):
+        self._approval_token_map = {}
+    self._approval_token_map[req_clean] = (str(request_id), str(session_key))
+    data = f"ea:{req_clean}:{choice}"
+    if len(data.encode("utf-8")) > _MAX_CB_BYTES:
+        raise ValueError("Callback data exceeds 64-byte limit")
+    return data
+
+
+BaleAdapter.build_approval_callback_data = _build_approval_callback_data
+
+
+def _main_menu_markup(self) -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "📊 وضعیت نوریکا", "callback_data": "cmd:/status"}],
+            [
+                {"text": "🔄 سلامت و تعویض API (Fallback)", "callback_data": "cmd:/fallback"},
+                {"text": "🧠 انتخاب مدل هوش مصنوعی", "callback_data": "cmd:/models"},
+            ],
+            [
+                {"text": "💾 بک‌آپ‌گیری فوری", "callback_data": "cmd:/backup"},
+                {"text": "📂 بازیابی بک‌آپ (Restore)", "callback_data": "cmd:/restore"},
+            ],
+            [
+                {"text": "🆕 گفتگوی جدید", "callback_data": "cmd:/new"},
+                {"text": "⏹️ توقف پردازش", "callback_data": "cmd:/stop"},
+            ],
+        ]
+    }
+
+
+BaleAdapter._main_menu_markup = _main_menu_markup
+
+
+async def _safe_answer_cb(self, cb_id: str) -> None:
+    if not cb_id or not getattr(self, "_client", None):
+        return
+    with contextlib.suppress(Exception):
+        url = self._method_url("answerCallbackQuery") if hasattr(self, "_method_url") else f"{self.api_base}{self.token}/answerCallbackQuery"
+        await self._client.post(url, json={"callback_query_id": str(cb_id)}, timeout=5.0)
+
+
+BaleAdapter._safe_answer_cb = _safe_answer_cb
+
+
+async def _dispatch_bale_panel_cmd(self, cmd: str, chat_id: str, user_id: str) -> bool:
+    norm = cmd.strip()
+    lower = norm.lower()
+
+    try:
+        from plugins.platforms.bale import backup_and_fallback as bf
+        if lower.startswith("/fallback") and hasattr(bf, "handle_fallback_async"):
+            return await bf.handle_fallback_async(self, chat_id, norm)
+        if (lower.startswith("/backup") or lower.startswith("/restore")) and hasattr(bf, "handle_backup_async"):
+            return await bf.handle_backup_async(self, chat_id, norm)
+        if lower.startswith("/models") and hasattr(bf, "handle_models_async"):
+            return await bf.handle_models_async(self, chat_id, norm)
+    except Exception as exc:
+        logger.debug("Optional bale suite handler skipped: %s", exc)
+
+    orig_builtin = getattr(self, "_handle_builtin_bale_command", None)
+    if callable(orig_builtin):
+        with contextlib.suppress(Exception):
+            res = orig_builtin(norm, chat_id)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return True
+
+    if lower in ("/start", "/help", "/menu", "منو", "شروع"):
+        lines = [
+            "🤖 **پنل هوشمند نوریکا (بله)**",
+            "",
+            "از طریق دکمه‌های شیشه‌ای زیر می‌توانید مدل‌ها، سلامت API و بک‌آپ سیستم را مدیریت کنید یا مستقیماً پیام خود را ارسال نمایید:",
+        ]
+        await self.send(chat_id, _NL.join(lines), metadata={"reply_markup": self._main_menu_markup()})
+        return True
+
+    if lower == "/status":
+        lines = [
+            "🟢 **وضعیت نوریکا:** متصل به هسته Agent و آماده پردازش.",
+            "• پلتفرم: Bale (رسمی)",
+            "• امنیت Allowlist: فعال",
+        ]
+        await self.send(chat_id, _NL.join(lines), metadata={"reply_markup": self._main_menu_markup()})
+        return True
+
+    if lower == "/new":
+        await self.send(chat_id, "🔄 نشست گفتگو تازه شد. پیام جدید خود را ارسال کنید.", metadata={"reply_markup": self._main_menu_markup()})
+        return True
+
+    if lower == "/stop":
+        await self.send(chat_id, "⏹️ پردازش جاری متوقف شد.", metadata={"reply_markup": self._main_menu_markup()})
+        return True
+
+    return False
+
+
+BaleAdapter._dispatch_bale_panel_cmd = _dispatch_bale_panel_cmd
+
+
+async def _audited_handle_callback_query(self, cb: Dict[str, Any]) -> None:
+    cb_id = str(cb.get("id") or "")
+    raw_data = str(cb.get("data") or "").strip()
+    sender = cb.get("from") or {}
+    user_id = str(sender.get("id") or "").strip()
+    msg = cb.get("message") or {}
+    chat = msg.get("chat") or {}
+    # Crucial Bale fix: fallback to user_id when msg.chat.id is absent in callback_query
+    chat_id = str(chat.get("id") or user_id).strip()
+    chat_type = str(chat.get("type") or "private").lower()
+    is_group = chat_type in ("group", "supergroup", "channel")
+
+    asyncio.create_task(self._safe_answer_cb(cb_id))
+
+    if not raw_data or len(raw_data.encode("utf-8")) > _MAX_CB_BYTES:
+        logger.warning("Rejected invalid/oversized Bale callback data.")
+        return
+
+    if raw_data.startswith("ea:"):
+        if not self._is_user_authorized(user_id, chat_id, is_group=is_group, require_personal_auth=True):
+            logger.warning("Unauthorized Bale approval callback attempt by user_id=%s", user_id)
+            return
+
+        parts = raw_data.split(":")
+        token_map = getattr(self, "_approval_token_map", {})
+        if len(parts) == 3:
+            _, req_token, choice = parts
+            mapped = token_map.get(req_token)
+            if not mapped:
+                logger.warning("Unknown or expired approval request token: %s", req_token)
+                return
+            request_id, session_key = mapped
+        elif len(parts) == 4:
+            _, request_id, session_key, choice = parts
+        else:
+            logger.warning("Malformed approval callback format.")
+            return
+
+        if choice not in _VALID_APPROVAL_CHOICES:
+            logger.warning("Rejected invalid approval choice: %s", choice)
+            return
+
+        if not request_id or not session_key:
+            return
+
+        token_map.pop(request_id, None)
+        resolver = getattr(self, "resolve_gateway_approval", None)
+        if callable(resolver):
+            res = resolver(request_id, session_key, choice)
+            if asyncio.iscoroutine(res):
+                await res
+        return
+
+    if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
+        logger.warning("Unauthorized Bale callback from user_id=%s", user_id)
+        return
+
+    cmd = raw_data
+    if cmd.startswith("cmd:"):
+        cmd = cmd[4:].strip()
+    if not cmd.startswith("/"):
+        cmd = "/" + cmd
+
+    if await self._dispatch_bale_panel_cmd(cmd, chat_id, user_id):
+        return
+
+    # Otherwise synthesize an inbound message update so original _handle_message / _process_update routes it to Agent
+    synthetic_msg = {
+        "message_id": msg.get("message_id") or 0,
+        "from": sender or {"id": user_id},
+        "chat": {"id": chat_id, "type": chat_type},
+        "text": cmd,
+    }
+    if hasattr(self, "_handle_inbound_message"):
+        await self._handle_inbound_message(synthetic_msg)
+    elif hasattr(self, "_handle_message_update"):
+        await self._handle_message_update(synthetic_msg)
+
+
+BaleAdapter._handle_callback_query = _audited_handle_callback_query
