@@ -144,6 +144,21 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.adapter.build_approval_callback_data("request-1", "session-1", "forged")
 
+    async def test_button_callback_without_chat_id_falls_back_to_user_id(self):
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._extract_media = AsyncMock(return_value=(MessageType.TEXT, [], []))
+        self.adapter._dispatch_bale_panel_cmd = AsyncMock(return_value=False)
+        self.adapter._api_request = AsyncMock(return_value={"ok": True})
+        await self.adapter._handle_callback_query({
+            "id": "callback-without-chat",
+            "from": {"id": "1001"},
+            "message": {"message_id": 10},
+            "data": "cmd:/unknown-test-command",
+        })
+        self.adapter.handle_message.assert_awaited_once()
+        event = self.adapter.handle_message.await_args.args[0]
+        self.assertEqual(str(event.source.chat_id), "1001")
+
     async def test_approval_prompt_uses_compact_callback_builder(self):
         self.adapter.send = AsyncMock(return_value=SendResult(success=True))
         prompt = ExecApprovalPrompt(
