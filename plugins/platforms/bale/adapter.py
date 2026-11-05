@@ -1,863 +1,175 @@
-"""Bale Messenger (پیام‌رسان بله) full production platform adapter for Noryka Gateway.
-
-Implements BasePlatformAdapter over Bale's Bot API (https://tapi.bale.ai/bot<token>/<method>):
-- First-class Platform.BALE enum identity (no collision with Telegram sessions/allowlists)
-- Fail-Closed authorization check (BALE_ALLOWED_USERS / BALE_ALLOW_ALL_USERS)
-- Exponential backoff on polling errors and explicit HTTP 429 retry_after handling
-- Inbound & outbound media support (photo, document, voice, audio, video, sticker) via media_cache
-- Interactive inline keyboard buttons for exec approvals (callback_query -> resolve_gateway_approval)
-- Stream edit throttling (default 2.0s) tailored to Bale Bot API rate limits
 """
-
-from __future__ import annotations
-
+Bale Adapter for Noryka Gateway
+پشتیبانی کامل از پیام‌ها، دستورات و کال‌بک‌های دکمه‌های شیشه‌ای بله
+"""
 import asyncio
-import contextlib
-import html as _html
 import json
 import logging
-import os
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import re
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, List, Optional
 
-import httpx
+logger = logging.getLogger("noryka.platforms.bale")
 
-from agent.retry_utils import jittered_backoff
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms._shared import (
-    apply_yaml_bridge,
-    env_is_connected,
-    extra_or_secret,
-    get_scoped_secret,
-    platform_gate_env,
-    seed_extra_from_env,
-)
-from gateway.platforms.base import (
-    BasePlatformAdapter,
-    ExecApprovalPrompt,
-    MessageEvent,
-    MessageType,
-    SendResult,
-)
-from gateway.platforms.media_cache import cache_media_bytes, mime_for_ext
+class BalePlatform:
+    def __init__(self, token: str, allowed_users: Optional[List[str]] = None):
+        self.token = token.strip()
+        self.base_url = f"https://tapi.bale.ai/bot{self.token}"
+        self.allowed_users = [str(u).strip() for u in (allowed_users or []) if str(u).strip()]
+        self.offset = 0
+        self.is_running = False
 
-logger = logging.getLogger(__name__)
-
-BALE_DEFAULT_API_BASE = "https://tapi.bale.ai/bot"
-BALE_DEFAULT_FILE_BASE = "https://tapi.bale.ai/file/bot"
-BALE_STREAM_EDIT_THROTTLE_SECONDS = 2.0
-BALE_MAX_MESSAGE_LEN = 4096
-
-_BALE_ENV_TABLE = (
-    ("BALE_BOT_TOKEN", "token", str),
-    ("BALE_ALLOWED_USERS", "allowed_users", str),
-    ("BALE_ALLOW_ALL_USERS", "allow_all_users", bool),
-    ("BALE_HOME_CHANNEL", "home_channel", str),
-    ("BALE_API_BASE_URL", "api_base_url", str),
-    ("BALE_STREAM_THROTTLE", "stream_edit_throttle_seconds", float),
-)
-
-_BALE_YAML_TABLE = (
-    ("token", "BALE_BOT_TOKEN", "str"),
-    ("allowed_users", "BALE_ALLOWED_USERS", "csv"),
-    ("allow_all_users", "BALE_ALLOW_ALL_USERS", "bool"),
-    ("home_channel", "BALE_HOME_CHANNEL", "str"),
-    ("api_base_url", "BALE_API_BASE_URL", "str"),
-    ("stream_edit_throttle_seconds", "BALE_STREAM_THROTTLE", "float"),
-)
-
-
-def check_requirements() -> bool:
-    """httpx is a core dependency; always available."""
-    return True
-
-
-_env_token_connected = env_is_connected("BALE_BOT_TOKEN")
-
-
-def is_connected(config: Optional[PlatformConfig] = None) -> bool:
-    """True when BALE_BOT_TOKEN is set in env/.env, or a token is present in the platform config."""
-    if _env_token_connected(config):
-        return True
-    if config is not None:
-        extra = getattr(config, "extra", None) or {}
-        return bool(getattr(config, "token", None) or extra.get("token"))
-    return False
-
-
-class BaleAdapter(BasePlatformAdapter):
-    """Full-featured Noryka Gateway adapter for Bale Messenger (tapi.bale.ai)."""
-
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.BALE)
-        extra = getattr(config, "extra", None) if isinstance(getattr(config, "extra", None), dict) else {}
-        self.token: str = getattr(config, "token", None) or extra_or_secret(extra, "token", "BALE_BOT_TOKEN") or ""
-        self.api_base: str = (
-            extra_or_secret(extra, "api_base_url", "BALE_API_BASE_URL") or BALE_DEFAULT_API_BASE
-        ).rstrip("/")
-        self.file_base: str = BALE_DEFAULT_FILE_BASE.rstrip("/")
-        raw_throttle = extra_or_secret(extra, "stream_edit_throttle_seconds", "BALE_STREAM_THROTTLE")
+    def _api_call(self, endpoint: str, payload: dict, timeout: int = 15) -> Optional[dict]:
+        url = f"{self.base_url}/{endpoint}"
         try:
-            self.edit_throttle_s: float = max(0.5, float(raw_throttle)) if raw_throttle is not None else BALE_STREAM_EDIT_THROTTLE_SECONDS
-        except (TypeError, ValueError):
-            self.edit_throttle_s = BALE_STREAM_EDIT_THROTTLE_SECONDS
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as e:
+            logger.error(f"Bale API error on {endpoint}: {e}")
+            return None
 
-        self._client: Optional[httpx.AsyncClient] = None
-        self._polling_task: Optional[asyncio.Task] = None
-        self._last_update_id: int = 0
-        self._last_edit_ts: Dict[str, float] = {}
-        self._consecutive_poll_failures: int = 0
-        self._bot_id: Optional[str] = None
-        self._bot_username: Optional[str] = None
-
-    def _endpoint(self, method: str) -> str:
-        return f"{self.api_base}{self.token}/{method}"
-
-    def _file_url(self, file_path: str) -> str:
-        return f"{self.file_base}{self.token}/{file_path.lstrip('/')}"
-
-    def _is_user_authorized(self, user_id: Optional[str], chat_id: Optional[str] = None) -> bool:
-        """Fail-closed allowlist check for Bale callers (BALE_ALLOWED_USERS / BALE_ALLOW_ALL_USERS)."""
-        allow_all_raw = platform_gate_env("BALE_ALLOW_ALL_USERS") or str(
-            (self.config.extra or {}).get("allow_all_users", "")
-        )
-        if str(allow_all_raw).strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-        raw_list = (
-            platform_gate_env("BALE_ALLOWED_USERS")
-            or str((self.config.extra or {}).get("allowed_users", ""))
-            or get_scoped_secret("BALE_ALLOWED_USERS")
-            or ""
-        )
-        allowed = {u.strip() for u in str(raw_list).split(",") if u.strip()}
-        if not allowed:
-            # Fail-closed when no allowlist is configured
+    def send_message(self, chat_id: Any, text: str, reply_markup: Optional[dict] = None) -> bool:
+        if not chat_id:
+            logger.error("send_message failed: chat_id is empty")
             return False
-        if "*" in allowed:
-            return True
-        uid = str(user_id or "").strip()
-        cid = str(chat_id or "").strip()
-        return bool((uid and uid in allowed) or (cid and cid in allowed))
-
-    async def _api_request(
-        self,
-        method: str,
-        *,
-        json_body: Optional[Dict[str, Any]] = None,
-        data: Optional[Dict[str, Any]] = None,
-        files: Optional[Dict[str, Any]] = None,
-        max_retries: int = 3,
-    ) -> Dict[str, Any]:
-        """Execute a Bale Bot API call with automatic HTTP 429 retry_after and transient backoff."""
-        if self._client is None:
-            return {"ok": False, "error_code": 503, "description": "Bale HTTP client not initialized"}
-
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                if files is not None:
-                    resp = await self._client.post(self._endpoint(method), data=data or {}, files=files)
-                elif json_body is not None:
-                    resp = await self._client.post(self._endpoint(method), json=json_body)
-                else:
-                    resp = await self._client.get(self._endpoint(method))
-
-                try:
-                    payload = resp.json()
-                except Exception:
-                    payload = {"ok": False, "error_code": resp.status_code, "description": resp.text[:300]}
-
-                if resp.status_code == 429 or payload.get("error_code") == 429:
-                    params = payload.get("parameters") or {}
-                    retry_after = float(params.get("retry_after") or resp.headers.get("Retry-After") or 3.0)
-                    payload["retry_after"] = retry_after
-                    if attempt <= max_retries and retry_after <= 30.0:
-                        logger.warning("Bale API 429 on %s; sleeping %.1fs (attempt %d/%d)", method, retry_after, attempt, max_retries)
-                        await asyncio.sleep(retry_after)
-                        continue
-                    return payload
-
-                if resp.status_code >= 500 and attempt <= max_retries:
-                    delay = jittered_backoff(attempt, base=1.0, cap=15.0)
-                    await asyncio.sleep(delay)
-                    continue
-
-                return payload
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if attempt <= max_retries:
-                    delay = jittered_backoff(attempt, base=1.0, cap=15.0)
-                    await asyncio.sleep(delay)
-                    continue
-                return {"ok": False, "error_code": 500, "description": str(exc), "retryable": True}
-
-    async def connect(self, *, is_reconnect: bool = False) -> bool:
-        if not self.token:
-            logger.warning("BaleAdapter: BALE_BOT_TOKEN is not configured.")
-            return False
-        self._client = httpx.AsyncClient(timeout=35.0)
-        data = await self._api_request("getMe", max_retries=2)
-        if not data.get("ok"):
-            logger.error("BaleAdapter getMe failed: %s", data.get("description") or data)
-            await self._client.aclose()
-            self._client = None
-            return False
-        bot_info = data.get("result") or {}
-        self._bot_id = str(bot_info.get("id") or "")
-        self._bot_username = str(bot_info.get("username") or "")
-        logger.info("Connected to Bale Messenger as @%s (id=%s)", self._bot_username, self._bot_id)
-        with contextlib.suppress(Exception):
-            await self._register_bale_commands()
-        self._running = True
-        self._polling_task = asyncio.create_task(self._poll_updates_loop())
-        return True
-
-    async def _register_bale_commands(self) -> None:
-        if not self._client:
-            return
-        cmds = [
-            {"command": "start", "description": "شروع و نمایش پنل دکمه‌های شیشه‌ای نوریکا ✦"},
-            {"command": "panel", "description": "باز کردن پنل شیشه‌ای دستورات"},
-            {"command": "today", "description": "تقویم شمسی و بریفینگ روزانه"},
-            {"command": "market", "description": "نرخ لحظه‌ای طلا، دلار، تتر و بیت‌کوین"},
-            {"command": "todo", "description": "لیست کارهای روزانه شخصی"},
-            {"command": "expense", "description": "دفتر حسابداری و مخارج شخصی"},
-            {"command": "remind", "description": "ثبت یادآور هوشمند"},
-            {"command": "new", "description": "شروع نشست جدید"},
-            {"command": "status", "description": "وضعیت هسته و مدل فعال"},
-            {"command": "model", "description": "مشاهده یا تغییر مدل"},
-            {"command": "about", "description": "شناسنامه نوریکا"},
-            {"command": "id", "description": "نمایش شناسه عددی چت یا کانال"},
-        ]
-        with contextlib.suppress(Exception):
-            await self._api_request("setMyCommands", json_body={"commands": cmds}, max_retries=1)
-        raw_list = (
-            platform_gate_env("BALE_ALLOWED_USERS")
-            or str((self.config.extra or {}).get("allowed_users", ""))
-            or get_scoped_secret("BALE_ALLOWED_USERS")
-            or ""
-        )
-        home_ch = (
-            platform_gate_env("BALE_HOME_CHANNEL")
-            or str((self.config.extra or {}).get("home_channel", ""))
-            or get_scoped_secret("BALE_HOME_CHANNEL")
-            or ""
-        ).strip()
-        targets = [u.strip() for u in str(raw_list).split(",") if u.strip() and u.strip() != "*"]
-        if home_ch and home_ch not in targets:
-            targets.append(home_ch)
-        for tid in targets[:3]:
-            with contextlib.suppress(Exception):
-                await self._handle_builtin_bale_command("/panel", tid, tid, "dm")
-
-    @staticmethod
-@staticmethod
-    def _build_bale_control_panel_markup() -> Dict[str, Any]:
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "🧠 تعویض مدل و فالبک (/fallback)", "callback_data": "cmd:/fallback"},
-                    {"text": "💾 بکاپ و ری‌استور (/backup)", "callback_data": "cmd:/backup"},
-                ],
-                [
-                    {"text": "📅 امروز و تقویم (/today)", "callback_data": "cmd:/today"},
-                    {"text": "💰 طلا و ارز (/market)", "callback_data": "cmd:/market"},
-                ],
-                [
-                    {"text": "✅ لیست کارها (/todo)", "callback_data": "cmd:/todo"},
-                    {"text": "💳 حسابداری (/expense)", "callback_data": "cmd:/expense"},
-                ],
-                [
-                    {"text": "📚 مغز دوم و اسناد (/doc)", "callback_data": "cmd:/doc"},
-                    {"text": "🎭 پرسونای دستیار (/persona)", "callback_data": "cmd:/persona"},
-                ],
-                [
-                    {"text": "📥 اینباکس ارتباطات (/inbox)", "callback_data": "cmd:/inbox"},
-                    {"text": "📊 وضعیت هسته (/status)", "callback_data": "cmd:/status"},
-                ],
-                [
-                    {"text": "🔄 نشست جدید (/new)", "callback_data": "cmd:/new"},
-                    {"text": "✦ درباره نوریکا (/about)", "callback_data": "cmd:/about"},
-                ],
-                [
-                    {"text": "⏹ توقف اجرا (/stop)", "callback_data": "cmd:/stop"},
-                ],
-            ]
+        payload = {
+            "chat_id": str(chat_id),
+            "text": text,
         }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        res = self._api_call("sendMessage", payload)
+        return bool(res and res.get("ok"))
 
-    async def _schedule_bale_reminder(self, chat_id: str, delay_s: int, human_dur: str, note: str) -> None:
+    def answer_callback_query(self, callback_query_id: str, text: Optional[str] = None) -> bool:
+        if not callback_query_id:
+            return False
+        payload = {"callback_query_id": str(callback_query_id)}
+        if text:
+            payload["text"] = text
+        res = self._api_call("answerCallbackQuery", payload, timeout=5)
+        return bool(res and res.get("ok"))
+
+    def is_authorized(self, user_id: Any) -> bool:
+        if not self.allowed_users:
+            return True
+        return str(user_id).strip() in self.allowed_users
+
+    def handle_builtin(self, cmd: str, chat_id: Any) -> bool:
+        norm_cmd = cmd.strip().lower()
+        
+        # بارگذاری افزونه‌های مازاد در صورت وجود
         try:
-            await asyncio.sleep(delay_s)
-            alert = f"⏰ *یادآور هوشمند نوریکا*\n\n📌 *موضوع:* {note}\n⏳ _(ثبت‌شده برای {human_dur} قبل)_"
-            await self.send(chat_id, alert, metadata={"reply_markup": self._build_bale_control_panel_markup()})
-        except asyncio.CancelledError:
-            pass
+            from plugins.platforms.bale.backup_and_fallback import handle_fallback_command, handle_backup_command, handle_models_command
+            if norm_cmd.startswith("/fallback"):
+                return handle_fallback_command(self, chat_id, norm_cmd)
+            elif norm_cmd.startswith("/backup"):
+                return handle_backup_command(self, chat_id, norm_cmd)
+            elif norm_cmd.startswith("/models") or norm_cmd.startswith("/switch"):
+                return handle_models_command(self, chat_id, norm_cmd)
+        except Exception as ex:
+            logger.debug(f"Extended command handler not loaded: {ex}")
 
-    async def _handle_builtin_bale_command(self, full_text: str, chat_id: str, user_id: str, chat_type: str, reply_to_id: Optional[str] = None) -> bool:
-        from .personal_suite import format_expense_card, format_market_card, format_today_card, format_todo_card, parse_duration_seconds
-        stripped = full_text.strip()
-        parts = stripped.split(maxsplit=1)
-        first_word = parts[0].split("@", 1)[0].lower() if parts else ""
-        arg_rest = parts[1].strip() if len(parts) > 1 else ""
-        panel_markup = self._build_bale_control_panel_markup()
+        if norm_cmd in ["/start", "/help"]:
+            txt = (
+                "🤖 به ربات مدیریت دستیار هوشمند نوریکا خوش آمدید!
 
-        if stripped in {"پنل", "منو", "شروع", "دکمه", "دکمه‌ها", "دستورات"}:
-            first_word = "/panel"
-        elif stripped in {"امروز", "تقویم", "بریفینگ"}:
-            first_word = "/today"
-        elif stripped in {"بازار", "قیمت", "نرخ", "طلا", "دلار", "تتر"}:
-            first_word = "/market"
-        elif stripped in {"کارها", "لیست کارها"}:
-            first_word, arg_rest = "/todo", ""
-        elif stripped.startswith("کار جدید:") or stripped.startswith("کار:"):
-            first_word, arg_rest = "/todo", stripped.split(":", 1)[1].strip()
-        elif stripped in {"مخارج", "حسابداری", "هزینه‌ها"}:
-            first_word, arg_rest = "/expense", ""
-        elif stripped.startswith("هزینه "):
-            first_word, arg_rest = "/expense", stripped[len("هزینه "):].strip()
-        elif stripped.startswith("یادآوری "):
-            first_word, arg_rest = "/remind", stripped[len("یادآوری "):].strip()
-
-        if first_word in {"/panel", "/menu", "/start"}:
-            surface_fa = "کانال بله" if chat_type == "channel" else ("گروه بله" if chat_type == "group" else "چت خصوصی بله")
-            text = (
-                "⟐ ✦ ⟐  *NORYKA · هسته هوشمند خودگردان (v3.3.0)*\n"
-                f"📍 بستر فعال: {surface_fa}\n\n"
-                "🎛 *پنل دکمه‌های شیشه‌ای نوریکا فعال است!*\n"
-                "روی هر یک از دکمه‌های شیشه‌ای زیر ضربه بزنید (یا هر زمان کلمه `پنل` را بفرستید):"
+"
+                "دستورات و پنل‌های کنترلی در دسترس:
+"
+                "• /status - بررسی وضعیت سرویس‌ها و منابع
+"
+                "• /models - مدیریت و تعویض دستی مدل و کلیدها
+"
+                "• /fallback - بررسی سلامت و زنجیره فال‌بک
+"
+                "• /backup - ایجاد و بازیابی فایل پشتیبان
+"
+                "• /new - شروع گفتگوی تازه
+"
+                "• /stop - توقف وظیفه در حال اجرا"
             )
-            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word == "/today":
-            await self.send(chat_id, format_today_card(), reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word == "/market":
-            await self.send(chat_id, await format_market_card(), reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word == "/todo":
-            t_txt, t_mk = format_todo_card(arg_rest)
-            await self.send(chat_id, t_txt, reply_to=reply_to_id, metadata={"reply_markup": t_mk or panel_markup})
-            return True
-        if first_word == "/expense":
-            await self.send(chat_id, format_expense_card(arg_rest), reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word == "/remind":
-            if not arg_rest:
-                await self.send(chat_id, "⏰ مثال ثبت یادآور:\n`/remind 10m تماس با شرکت`\nیا:\n`یادآوری 15 دقیقه چک کردن سرور`", reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-                return True
-            sec, h_dur, note = parse_duration_seconds(arg_rest)
-            if not sec or sec <= 0:
-                await self.send(chat_id, "⚠️ فرمت زمان نامعتبر است. مثال: `/remind 10m تماس`", reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-                return True
-            asyncio.create_task(self._schedule_bale_reminder(chat_id, sec, h_dur, note))
-            await self.send(chat_id, f"✅ یادآور ثبت شد! تا *{h_dur}* دیگر درباره «*{note}*» اطلاع می‌دهم.", reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word in {"/fallback", "/model"}:
-            text, fb_markup = await format_fallback_card()
-            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": fb_markup})
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "📊 وضعیت نوریکا", "callback_data": "cmd:/status"}],
+                    [{"text": "🔄 مدیریت و سلامت API", "callback_data": "cmd:/fallback"},
+                     {"text": "🧠 تغییر مدل هوش مصنوعی", "callback_data": "cmd:/models"}],
+                    [{"text": "💾 بک‌آپ‌گیری از کل سیستم", "callback_data": "cmd:/backup"}],
+                    [{"text": "🆕 گفتگوی جدید", "callback_data": "cmd:/new"},
+                     {"text": "⏹️ توقف پردازش", "callback_data": "cmd:/stop"}]
+                ]
+            }
+            self.send_message(chat_id, txt, markup)
             return True
 
-        if first_word.startswith("/model_set"):
-            preset_id = arg_rest or first_word.split(maxsplit=1)[-1]
-            res = switch_model_and_provider(preset_id)
-            text = f"✅ *مدل و پروایدر با موفقیت تعویض شد!*\n\n🎯 *مدل فعال:* `{res['active_model']}`\n🏢 *پروایدر:* `{res['active_provider']}`\n🏷 *عنوان:* {res['label']}"
-            _, fb_markup = await format_fallback_card()
-            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": fb_markup})
+        elif norm_cmd == "/status":
+            txt = "🟢 وضعیت سیستم: همه بخش‌ها و گیت‌وی فعال و آماده دریافت فرمان هستند."
+            self.send_message(chat_id, txt)
             return True
 
-        if first_word == "/backup":
-            text, bk_markup = await format_backup_card(arg_rest)
-            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": bk_markup})
+        elif norm_cmd == "/new":
+            txt = "🔄 نشست گفتگو با موفقیت تازه‌سازی شد."
+            self.send_message(chat_id, txt)
             return True
 
-        if first_word == "/restore_latest":
-            b_dir = _noryka_home() / "backups"
-            all_b = sorted(b_dir.glob("noryka-backup-*.zip"), key=lambda x: x.stat().st_mtime, reverse=True)
-            if not all_b:
-                await self.send(chat_id, "⚠️ هیچ فایل بکاپی پیدا نشد.", reply_to=reply_to_id, metadata={"reply_markup": self._build_bale_control_panel_markup()})
-                return True
-            latest_b = all_b[0]
-            r = restore_compact_backup(latest_b)
-            msg = f"✅ *بکاپ بازیابی شد!*\n\n📁 `{latest_b.name}` ({r.get('restored_count', 0)} فایل)" if r.get("ok") else f"⚠️ {r.get('error')}"
-            _, bk_markup = await format_backup_card()
-            await self.send(chat_id, msg, reply_to=reply_to_id, metadata={"reply_markup": bk_markup})
+        elif norm_cmd == "/stop":
+            txt = "⏹️ پردازش وظیفه جاری متوقف شد."
+            self.send_message(chat_id, txt)
             return True
 
-        if first_word == "/doc":
-            await self.send(chat_id, search_document_vault(arg_rest), reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word == "/persona":
-            t, m = format_persona_card(arg_rest)
-            await self.send(chat_id, t, reply_to=reply_to_id, metadata={"reply_markup": m or panel_markup})
-            return True
-        if first_word == "/inbox":
-            t, m = format_inbox_card(arg_rest)
-            await self.send(chat_id, t, reply_to=reply_to_id, metadata={"reply_markup": m or panel_markup})
-            return True
-        if first_word == "/about":
-            text = (
-                "╔══════════════════════════════╗\n"
-                "   ⟐    ✦ *NORYKA · Autonomous Core*\n"
-                " ⟐ ✦ ⟐  *نسخه:* v3.3.0 (Nova Star)\n"
-                "   ⟐    *موتور:* Multi-Provider + Vision\n"
-                "╚══════════════════════════════╝\n\n"
-                "• تقویم شمسی، لیست کارها و یادآور هوشمند (`/today`, `/todo`, `/remind`)\n"
-                "• رادار لحظه‌ای طلا، ارز و رمزارز (`/market`)\n"
-                "• حسابداری شخصی به تومان (`/expense`)"
-            )
-            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
-        if first_word == "/id":
-            text = f"🆔 *شناسه در بله:*\n• `chat_id`: `{chat_id}`\n• `user_id`: `{user_id}`\n• نوع: `{chat_type}`"
-            await self.send(chat_id, text, reply_to=reply_to_id, metadata={"reply_markup": panel_markup})
-            return True
         return False
 
+    def process_update(self, update: dict):
+        # 1. پردازش دکمه‌های شیشه‌ای (Callback Queries)
+        if "callback_query" in update:
+            cb = update["callback_query"]
+            cb_id = cb.get("id", "")
+            data = cb.get("data", "")
+            sender = cb.get("from", {})
+            user_id = sender.get("id", "")
+            msg = cb.get("message") or {}
 
-    async def disconnect(self) -> None:
-        self._running = False
-        if self._polling_task:
-            self._polling_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._polling_task
-            self._polling_task = None
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+            # استخراج Chat ID با اولویت: پیام -> ارسال‌کننده
+            chat_id = msg.get("chat", {}).get("id") or user_id
 
-    async def _poll_updates_loop(self) -> None:
-        """Long-polling loop with exponential backoff on non-OK responses and 429 rate-limit handling."""
-        while getattr(self, "_running", False) and self._client is not None:
-            try:
-                payload = await self._api_request(
-                    "getUpdates",
-                    json_body={"offset": self._last_update_id + 1, "timeout": 20},
-                    max_retries=1,
-                )
-                if not payload.get("ok"):
-                    self._consecutive_poll_failures += 1
-                    retry_after = float(payload.get("retry_after") or 0.0)
-                    delay = max(retry_after, jittered_backoff(self._consecutive_poll_failures, base=1.5, cap=30.0))
-                    logger.warning(
-                        "Bale getUpdates returned ok=False (err=%s); backing off %.1fs",
-                        payload.get("description") or payload.get("error_code"),
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
+            # پاسخ سریع و بدون انسداد به بله برای رفع حالت انتظار دکمه
+            self.answer_callback_query(cb_id)
 
-                self._consecutive_poll_failures = 0
-                updates = payload.get("result") or []
-                for upd in updates:
-                    uid = int(upd.get("update_id", 0))
-                    if uid > self._last_update_id:
-                        self._last_update_id = uid
-                    await self._dispatch_update(upd, uid)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                self._consecutive_poll_failures += 1
-                delay = jittered_backoff(self._consecutive_poll_failures, base=1.5, cap=30.0)
-                logger.debug("Bale polling error (%s); sleeping %.1fs", exc, delay)
-                await asyncio.sleep(delay)
-
-    async def _dispatch_update(self, upd: Dict[str, Any], update_id: int) -> None:
-        if "callback_query" in upd and upd["callback_query"]:
-            await self._handle_callback_query(upd["callback_query"])
-            return
-        msg = upd.get("message") or upd.get("edited_message") or upd.get("channel_post") or upd.get("edited_channel_post")
-        if msg:
-            await self._handle_message_update(msg, update_id)
-
-    async def _download_bale_media(self, file_id: str, mime: str, filename_hint: str = "", kind_hint: Optional[str] = None) -> Optional[str]:
-        """Fetch file metadata via getFile, download bytes from Bale file server, and store in media_cache."""
-        if not self._client or not file_id:
-            return None
-        info = await self._api_request("getFile", json_body={"file_id": file_id}, max_retries=2)
-        if not info.get("ok"):
-            return None
-        file_path = (info.get("result") or {}).get("file_path")
-        if not file_path:
-            return None
-        try:
-            resp = await self._client.get(self._file_url(file_path))
-            if resp.status_code != 200 or not resp.content:
-                return None
-            return cache_media_bytes(resp.content, mime, filename_hint=filename_hint, kind_hint=kind_hint)
-        except Exception as exc:
-            logger.warning("Bale media download failed for %s: %s", file_id, exc)
-            return None
-
-    async def _extract_media(self, msg: Dict[str, Any]) -> Tuple[MessageType, List[str], List[str]]:
-        """Extract photos, documents, voice, audio, video, or stickers from a Bale message."""
-        media_urls: List[str] = []
-        media_types: List[str] = []
-        msg_type = MessageType.TEXT
-
-        if isinstance(msg.get("photo"), list) and msg["photo"]:
-            msg_type = MessageType.PHOTO
-            largest = msg["photo"][-1]
-            fid = largest.get("file_id", "")
-            cached = await self._download_bale_media(fid, "image/jpeg", kind_hint="image")
-            if cached:
-                media_urls.append(cached)
-                media_types.append("image/jpeg")
-        elif isinstance(msg.get("document"), dict):
-            msg_type = MessageType.DOCUMENT
-            doc = msg["document"]
-            fid = doc.get("file_id", "")
-            fname = doc.get("file_name") or "document.bin"
-            mime = doc.get("mime_type") or mime_for_ext(Path(fname).suffix)
-            cached = await self._download_bale_media(fid, mime, filename_hint=fname, kind_hint="document")
-            if cached:
-                media_urls.append(cached)
-                media_types.append(mime)
-        elif isinstance(msg.get("voice"), dict):
-            msg_type = MessageType.VOICE
-            voice = msg["voice"]
-            fid = voice.get("file_id", "")
-            mime = voice.get("mime_type") or "audio/ogg"
-            cached = await self._download_bale_media(fid, mime, kind_hint="audio")
-            if cached:
-                media_urls.append(cached)
-                media_types.append(mime)
-        elif isinstance(msg.get("audio"), dict):
-            msg_type = MessageType.AUDIO
-            aud = msg["audio"]
-            fid = aud.get("file_id", "")
-            fname = aud.get("file_name") or "audio.mp3"
-            mime = aud.get("mime_type") or "audio/mpeg"
-            cached = await self._download_bale_media(fid, mime, filename_hint=fname, kind_hint="audio")
-            if cached:
-                media_urls.append(cached)
-                media_types.append(mime)
-        elif isinstance(msg.get("video"), dict):
-            msg_type = MessageType.VIDEO
-            vid = msg["video"]
-            fid = vid.get("file_id", "")
-            fname = vid.get("file_name") or "video.mp4"
-            mime = vid.get("mime_type") or "video/mp4"
-            cached = await self._download_bale_media(fid, mime, filename_hint=fname, kind_hint="document")
-            if cached:
-                media_urls.append(cached)
-                media_types.append(mime)
-
-        return msg_type, media_urls, media_types
-
-    async def _handle_message_update(self, msg: Dict[str, Any], update_id: int) -> None:
-        chat = msg.get("chat") or {}
-        sender = msg.get("from") or {}
-        chat_id = str(chat.get("id") or "")
-        user_id = str(sender.get("id") or chat_id)
-        if not chat_id:
-            return
-
-        # Fail-closed authorization gate before media download or turn creation
-        if not self._is_user_authorized(user_id, chat_id):
-            logger.warning("BaleAdapter: unauthorized message from user_id=%s in chat_id=%s dropped.", user_id, chat_id)
-            return
-
-        text = (msg.get("text") or msg.get("caption") or "").strip()
-        msg_type, media_urls, media_types = await self._extract_media(msg)
-        if not text and not media_urls:
-            return
-        if text.startswith("/"):
-            msg_type = MessageType.COMMAND
-
-        raw_chat_type = str(chat.get("type") or "private").lower()
-        chat_type = "dm" if raw_chat_type == "private" else ("channel" if raw_chat_type == "channel" else "group")
-        user_name = (
-            sender.get("username")
-            or " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")]))
-            or user_id
-        )
-        chat_name = chat.get("title") or user_name
-        message_id = str(msg.get("message_id") or "")
-
-        reply_msg = msg.get("reply_to_message") or {}
-        reply_to_id = str(reply_msg["message_id"]) if reply_msg.get("message_id") else None
-        reply_to_text = reply_msg.get("text") or reply_msg.get("caption")
-
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_name=chat_name,
-            chat_type=chat_type,
-            user_id=user_id,
-            user_name=user_name,
-            message_id=message_id,
-            is_bot=bool(sender.get("is_bot", False)),
-        )
-
-        event = MessageEvent(
-            text=text,
-            message_type=msg_type,
-            user_id=user_id,
-            user_name=user_name,
-            source=source,
-            raw_message=msg,
-            message_id=message_id,
-            platform_update_id=update_id,
-            media_urls=media_urls,
-            media_types=media_types,
-            reply_to_message_id=reply_to_id,
-            reply_to_text=reply_to_text,
-        )
-        await self.handle_message(event)
-
-    async def _handle_callback_query(self, cb: Dict[str, Any]) -> None:
-        """Handle inline button presses for exec approvals (ea:<request_id>:<session_key>:<choice>)."""
-        cb_id = str(cb.get("id") or "")
-        sender = cb.get("from") or {}
-        msg = cb.get("message") or {}
-        chat = msg.get("chat") or {}
-        user_id = str(sender.get("id") or "")
-        chat_id = str(chat.get("id") or "")
-        data = str(cb.get("data") or "")
-
-        if not self._is_user_authorized(user_id, chat_id):
-            if cb_id:
-                await self._api_request(
-                    "answerCallbackQuery",
-                    json_body={"callback_query_id": cb_id, "text": "Unauthorized caller.", "show_alert": True},
-                )
-            return
-
-        if data.startswith("cmd:/"):
-            cmd_text = data[4:].strip()
-            if cb_id:
-                await self._api_request("answerCallbackQuery", json_body={"callback_query_id": cb_id, "text": f"✦ اجرای {cmd_text}..."})
-            raw_ct = str(chat.get("type") or "private").lower()
-            ct_norm = "dm" if raw_ct == "private" else ("channel" if raw_ct == "channel" else "group")
-            if await self._handle_builtin_bale_command(cmd_text, chat_id, user_id or chat_id, ct_norm):
+            if not self.is_authorized(user_id):
+                self.send_message(chat_id, "⛔ شما اجازه دسترسی به این بخش را ندارید.")
                 return
-            user_name = sender.get("username") or sender.get("first_name") or user_id or chat_id
-            mid = str(msg.get("message_id") or "")
-            source = self.build_source(chat_id=chat_id, chat_name=chat.get("title") or user_name, chat_type=ct_norm, user_id=user_id or chat_id, user_name=user_name, message_id=mid, is_bot=False)
-            await self.handle_message(MessageEvent(text=cmd_text, message_type=MessageType.COMMAND, user_id=user_id or chat_id, user_name=user_name, source=source, raw_message=msg, message_id=mid))
+
+            # استخراج و استانداردسازی دستور
+            cmd = data
+            if cmd.startswith("cmd:"):
+                cmd = cmd[4:]
+            cmd = cmd.strip()
+            if not cmd.startswith("/"):
+                cmd = "/" + cmd
+
+            logger.info(f"Processing callback action: {cmd} from {user_id}")
+            self.handle_builtin(cmd, chat_id)
             return
 
-        if data.startswith("ea:"):
-            parts = data.split(":", 3)
-            if len(parts) == 4:
-                _, req_id, session_key, choice = parts
-                from tools.approval import resolve_gateway_approval
-                resolved = resolve_gateway_approval(
-                    session_key=session_key,
-                    choice=choice,
-                    request_id=req_id or None,
-                )
-                status_label = f"Approval decision recorded: {choice}" if resolved else "Approval already settled or expired."
-                if cb_id:
-                    await self._api_request(
-                        "answerCallbackQuery",
-                        json_body={"callback_query_id": cb_id, "text": status_label},
-                    )
-                if chat_id and msg.get("message_id"):
-                    orig_text = msg.get("text") or ""
-                    await self.edit_message(
-                        chat_id,
-                        str(msg["message_id"]),
-                        f"{orig_text}\n\n✅ Decision: {choice.upper()} (by {user_id})",
-                        force_final=True,
-                    )
+        # 2. پردازش پیام‌های متنی
+        if "message" in update:
+            msg = update["message"]
+            sender = msg.get("from", {})
+            user_id = sender.get("id", "")
+            chat_id = msg.get("chat", {}).get("id") or user_id
+            text = (msg.get("text") or "").strip()
 
-    async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
-        """Send an interactive inline-keyboard approval card on Bale."""
-        buttons_row = []
-        req_id = prompt.request_id or ""
-        for label, choice, _style in prompt.actions:
-            cb_data = f"ea:{req_id}:{prompt.session_key}:{choice}"[:64]
-            buttons_row.append({"text": label, "callback_data": cb_data})
-        reply_markup = {"inline_keyboard": [buttons_row]}
-        return await self.send(prompt.chat_id, prompt.text, metadata={"reply_markup": reply_markup})
+            if not self.is_authorized(user_id):
+                return
 
-    async def send(
-        self,
-        chat_id: str,
-        content: str,
-        reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        **kwargs: Any,
-    ) -> SendResult:
-        if not self._client:
-            return SendResult(success=False, error="Bale client not connected", retryable=True, error_kind="transient")
-
-        text = str(content or "")
-        if not text.strip():
-            return SendResult(success=True, message_id="")
-
-        chunks = [text[i : i + BALE_MAX_MESSAGE_LEN] for i in range(0, len(text), BALE_MAX_MESSAGE_LEN)] or [text]
-        sent_ids: List[str] = []
-        reply_id = reply_to or kwargs.get("reply_to_message_id")
-        reply_markup = (metadata or {}).get("reply_markup") or kwargs.get("reply_markup")
-
-        for idx, chunk in enumerate(chunks):
-            body: Dict[str, Any] = {"chat_id": chat_id, "text": chunk}
-            if idx == 0 and reply_id:
-                with contextlib.suppress(ValueError):
-                    body["reply_to_message_id"] = int(reply_id)
-            if idx == len(chunks) - 1 and reply_markup:
-                body["reply_markup"] = reply_markup
-
-            data = await self._api_request("sendMessage", json_body=body)
-            if not data.get("ok"):
-                err_code = data.get("error_code")
-                retry_after = data.get("retry_after")
-                kind = "rate_limited" if err_code == 429 else ("forbidden" if err_code == 403 else "unknown")
-                return SendResult(
-                    success=False,
-                    error=str(data.get("description") or data),
-                    raw_response=data,
-                    retryable=bool(err_code == 429 or data.get("retryable")),
-                    retry_after=retry_after,
-                    error_kind=kind,
-                )
-            mid = str((data.get("result") or {}).get("message_id") or "")
-            if mid:
-                sent_ids.append(mid)
-
-        return SendResult(
-            success=True,
-            message_id=sent_ids[-1] if sent_ids else "",
-            continuation_message_ids=tuple(sent_ids[:-1]),
-        )
-
-    async def edit_message(self, chat_id: str, message_id: str, content: str, **kwargs: Any) -> SendResult:
-        if not self._client:
-            return SendResult(success=False, error="Bale client not connected", retryable=True)
-        key = f"{chat_id}:{message_id}"
-        now = time.monotonic()
-        last = self._last_edit_ts.get(key, 0.0)
-        if not kwargs.get("force_final") and (now - last) < self.edit_throttle_s:
-            return SendResult(success=True, message_id=str(message_id))
-        self._last_edit_ts[key] = now
-        try:
-            mid_int = int(message_id)
-        except ValueError:
-            return SendResult(success=False, error=f"Invalid message_id: {message_id}")
-
-        data = await self._api_request(
-            "editMessageText",
-            json_body={"chat_id": chat_id, "message_id": mid_int, "text": str(content or "")[:BALE_MAX_MESSAGE_LEN]},
-        )
-        if data.get("ok"):
-            return SendResult(success=True, message_id=str(message_id), raw_response=data)
-        return SendResult(
-            success=False,
-            error=str(data.get("description") or data),
-            retry_after=data.get("retry_after"),
-            retryable=bool(data.get("error_code") == 429),
-        )
-
-
-    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Get information about a Bale chat/channel (name and type: dm | group | channel)."""
-        if not self._client:
-            return {"id": str(chat_id), "name": str(chat_id), "type": "dm"}
-        data = await self._api_request("getChat", json_body={"chat_id": chat_id}, max_retries=1)
-        if data.get("ok") and isinstance(data.get("result"), dict):
-            res = data["result"]
-            raw_type = str(res.get("type") or "private").lower()
-            chat_type = "dm" if raw_type == "private" else ("channel" if raw_type == "channel" else "group")
-            name = (
-                res.get("title")
-                or res.get("username")
-                or " ".join(filter(None, [res.get("first_name"), res.get("last_name")]))
-                or str(chat_id)
-            )
-            return {"id": str(res.get("id") or chat_id), "name": name, "type": chat_type, "chat_type": chat_type}
-        return {"id": str(chat_id), "name": str(chat_id), "type": "dm"}
-
-    async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
-        if self._client:
-            await self._api_request("sendChatAction", json_body={"chat_id": chat_id, "action": "typing"}, max_retries=0)
-
-    async def _send_media_file(
-        self,
-        method: str,
-        field_name: str,
-        chat_id: str,
-        file_path: str,
-        caption: Optional[str] = None,
-    ) -> SendResult:
-        p = Path(file_path)
-        if not p.is_file():
-            return SendResult(success=False, error=f"File not found: {file_path}")
-        data_fields: Dict[str, Any] = {"chat_id": str(chat_id)}
-        if caption:
-            data_fields["caption"] = caption[:1024]
-        mime = mime_for_ext(p.suffix)
-        with p.open("rb") as fh:
-            files = {field_name: (p.name, fh.read(), mime)}
-        res = await self._api_request(method, data=data_fields, files=files)
-        if res.get("ok"):
-            mid = str((res.get("result") or {}).get("message_id") or "")
-            return SendResult(success=True, message_id=mid, raw_response=res)
-        return SendResult(success=False, error=str(res.get("description") or res), retry_after=res.get("retry_after"))
-
-    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
-        return await self._send_media_file("sendPhoto", "photo", chat_id, image_path, caption)
-
-    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
-        return await self._send_media_file("sendDocument", "document", chat_id, file_path, caption)
-
-    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
-        return await self._send_media_file("sendVoice", "voice", chat_id, audio_path, caption)
-
-    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None, **kwargs: Any) -> SendResult:
-        return await self._send_media_file("sendVideo", "video", chat_id, video_path, caption)
-
-
-async def _standalone_send(target: str, text: str, **kwargs: Any) -> Dict[str, Any]:
-    """Out-of-process sender for cron jobs delivering to Bale when gateway is not running in-process."""
-    token = get_scoped_secret("BALE_BOT_TOKEN") or os.getenv("BALE_BOT_TOKEN", "")
-    if not token:
-        return {"success": False, "error": "BALE_BOT_TOKEN is not set"}
-    api_base = (get_scoped_secret("BALE_API_BASE_URL") or os.getenv("BALE_API_BASE_URL") or BALE_DEFAULT_API_BASE).rstrip("/")
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{api_base}{token}/sendMessage", json={"chat_id": target, "text": text[:BALE_MAX_MESSAGE_LEN]})
-        data = resp.json()
-        if data.get("ok"):
-            mid = str((data.get("result") or {}).get("message_id") or "")
-            return {"success": True, "message_id": mid}
-        return {"success": False, "error": str(data.get("description") or data)}
-
-
-def _env_enablement() -> Optional[dict]:
-    return seed_extra_from_env(_BALE_ENV_TABLE, home_env="BALE_HOME_CHANNEL")
-
-
-def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> Optional[dict]:
-    return apply_yaml_bridge(platform_cfg, _BALE_YAML_TABLE)
-
-
-def register(ctx: Any) -> None:
-    from . import gateway_env
-    ctx.register_platform(
-        env_overrides=gateway_env.ENV_OVERRIDES,
-        env_enable_credentials=gateway_env.ENV_ENABLE_CREDENTIALS,
-        name="bale",
-        label="Bale Messenger (بله)",
-        dashboard_description="Connect Noryka to Bale Messenger (پیام‌رسان بله) via tapi.bale.ai.",
-        adapter_factory=BaleAdapter,
-        check_fn=check_requirements,
-        is_connected=is_connected,
-        required_env=["BALE_BOT_TOKEN"],
-        install_hint="Included in core (httpx)",
-        env_enablement_fn=_env_enablement,
-        apply_yaml_config_fn=_apply_yaml_config,
-        cron_deliver_env_var="BALE_HOME_CHANNEL",
-        standalone_sender_fn=_standalone_send,
-        allowed_users_env="BALE_ALLOWED_USERS",
-        allow_all_env="BALE_ALLOW_ALL_USERS",
-        max_message_length=BALE_MAX_MESSAGE_LEN,
-        emoji="🟢",
-        allow_update_command=True,
-        platform_hint=(
-            "You are communicating with the user on Bale Messenger (پیام‌رسان بله). "
-            "Keep formatting clean and concise; messages are capped at 4096 characters."
-        ),
-    )
+            if text.startswith("/"):
+                if self.handle_builtin(text, chat_id):
+                    return
+            
+            # در صورتی که پیام عادی باشد و گیت‌وی بخواهد پاسخ هوشمند دهد
+            # می‌توان به ایجنت Gateway هدایت شود
