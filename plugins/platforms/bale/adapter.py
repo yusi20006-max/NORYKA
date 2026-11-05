@@ -17,6 +17,7 @@ import html as _html
 import json
 import logging
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,6 +53,7 @@ BALE_MAX_MESSAGE_LEN = 4096
 _BALE_ENV_TABLE = (
     ("BALE_BOT_TOKEN", "token", str),
     ("BALE_ALLOWED_USERS", "allowed_users", str),
+    ("BALE_ALLOWED_GROUPS", "allowed_groups", str),
     ("BALE_ALLOW_ALL_USERS", "allow_all_users", bool),
     ("BALE_HOME_CHANNEL", "home_channel", str),
     ("BALE_API_BASE_URL", "api_base_url", str),
@@ -61,6 +63,7 @@ _BALE_ENV_TABLE = (
 _BALE_YAML_TABLE = (
     ("token", "BALE_BOT_TOKEN", "secret"),
     ("allowed_users", "BALE_ALLOWED_USERS", "csv"),
+    ("allowed_groups", "BALE_ALLOWED_GROUPS", "csv"),
     ("allow_all_users", "BALE_ALLOW_ALL_USERS", "bool"),
     ("home_channel", "BALE_HOME_CHANNEL", "str"),
     ("api_base_url", "BALE_API_BASE_URL", "str"),
@@ -158,7 +161,7 @@ class BaleAdapter(BasePlatformAdapter):
                 try:
                     payload = resp.json()
                 except Exception:
-                    payload = {"ok": False, "error_code": resp.status_code, "description": resp.text[:300]}
+                    payload = {"ok": False, "error_code": resp.status_code, "description": _redact_bale_secret(resp.text[:300], self.token)}
 
                 if resp.status_code == 429 or payload.get("error_code") == 429:
                     params = payload.get("parameters") or {}
@@ -168,14 +171,14 @@ class BaleAdapter(BasePlatformAdapter):
                         logger.warning("Bale API 429 on %s; sleeping %.1fs (attempt %d/%d)", method, retry_after, attempt, max_retries)
                         await asyncio.sleep(retry_after)
                         continue
-                    return payload
+                    return _redact_bale_payload(payload, self.token)
 
                 if resp.status_code >= 500 and attempt <= max_retries:
                     delay = jittered_backoff(attempt, base=1.0, cap=15.0)
                     await asyncio.sleep(delay)
                     continue
 
-                return payload
+                return _redact_bale_payload(payload, self.token)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -183,7 +186,7 @@ class BaleAdapter(BasePlatformAdapter):
                     delay = jittered_backoff(attempt, base=1.0, cap=15.0)
                     await asyncio.sleep(delay)
                     continue
-                return {"ok": False, "error_code": 500, "description": str(exc), "retryable": True}
+                return {"ok": False, "error_code": 500, "description": _redact_bale_secret(exc, self.token), "retryable": True}
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self.token:
@@ -192,7 +195,7 @@ class BaleAdapter(BasePlatformAdapter):
         self._client = httpx.AsyncClient(timeout=35.0)
         data = await self._api_request("getMe", max_retries=2)
         if not data.get("ok"):
-            logger.error("BaleAdapter getMe failed: %s", data.get("description") or data)
+            logger.error("BaleAdapter getMe failed: %s", _redact_bale_secret(data.get("description") or data, self.token))
             await self._client.aclose()
             self._client = None
             return False
@@ -248,7 +251,7 @@ class BaleAdapter(BasePlatformAdapter):
             except Exception as exc:
                 self._consecutive_poll_failures += 1
                 delay = jittered_backoff(self._consecutive_poll_failures, base=1.5, cap=30.0)
-                logger.debug("Bale polling error (%s); sleeping %.1fs", exc, delay)
+                logger.debug("Bale polling error (%s); sleeping %.1fs", _redact_bale_secret(exc, self.token), delay)
                 await asyncio.sleep(delay)
 
     async def _dispatch_update(self, upd: Dict[str, Any], update_id: int) -> None:
@@ -270,12 +273,14 @@ class BaleAdapter(BasePlatformAdapter):
         if not file_path:
             return None
         try:
-            resp = await self._client.get(self._file_url(file_path))
-            if resp.status_code != 200 or not resp.content:
+            async with self._client.stream("GET", self._file_url(file_path)) as resp:
+                resp.raise_for_status()
+                content = await _read_bale_media_stream(resp)
+            if not content:
                 return None
-            return cache_media_bytes(resp.content, mime, filename_hint=filename_hint, kind_hint=kind_hint)
-        except Exception as exc:
-            logger.warning("Bale media download failed for %s: %s", file_id, exc)
+            return cache_media_bytes(content, mime, filename_hint=filename_hint, kind_hint=kind_hint)
+        except (httpx.HTTPError, ValueError, OSError) as exc:
+            logger.warning("Bale media download failed (details redacted): %s", _redact_bale_secret(exc, self.token))
             return None
 
     async def _extract_media(self, msg: Dict[str, Any]) -> Tuple[MessageType, List[str], List[str]]:
@@ -342,19 +347,25 @@ class BaleAdapter(BasePlatformAdapter):
         if not chat_id:
             return
 
-        # Fail-closed authorization gate before media download or turn creation
-        if not self._is_user_authorized(user_id, chat_id):
+        raw_chat_type = str(chat.get("type") or "private").lower()
+        is_group = raw_chat_type in ("group", "supergroup", "channel")
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        require_personal_auth = _requires_personal_bale_auth(text)
+
+        # Fail-closed authorization gate before media download or turn creation.
+        # Group membership grants conversation access, never administrative command access.
+        if not self._is_user_authorized(
+            user_id, chat_id, is_group=is_group, require_personal_auth=require_personal_auth
+        ):
             logger.warning("BaleAdapter: unauthorized message from user_id=%s in chat_id=%s dropped.", user_id, chat_id)
             return
 
-        text = (msg.get("text") or msg.get("caption") or "").strip()
         msg_type, media_urls, media_types = await self._extract_media(msg)
         if not text and not media_urls:
             return
         if text.startswith("/"):
             msg_type = MessageType.COMMAND
 
-        raw_chat_type = str(chat.get("type") or "private").lower()
         chat_type = "dm" if raw_chat_type == "private" else ("channel" if raw_chat_type == "channel" else "group")
         user_name = (
             sender.get("username")
@@ -442,7 +453,7 @@ class BaleAdapter(BasePlatformAdapter):
         buttons_row = []
         req_id = prompt.request_id or ""
         for label, choice, _style in prompt.actions:
-            cb_data = f"ea:{req_id}:{prompt.session_key}:{choice}"[:64]
+            cb_data = self.build_approval_callback_data(req_id, prompt.session_key, choice)
             buttons_row.append({"text": label, "callback_data": cb_data})
         reply_markup = {"inline_keyboard": [buttons_row]}
         return await self.send(prompt.chat_id, prompt.text, metadata={"reply_markup": reply_markup})
@@ -589,14 +600,17 @@ async def _standalone_send(target: str, text: str, **kwargs: Any) -> Dict[str, A
     token = get_scoped_secret("BALE_BOT_TOKEN") or os.getenv("BALE_BOT_TOKEN", "")
     if not token:
         return {"success": False, "error": "BALE_BOT_TOKEN is not set"}
-    api_base = (get_scoped_secret("BALE_API_BASE_URL") or os.getenv("BALE_API_BASE_URL") or BALE_DEFAULT_API_BASE).rstrip("/")
+    try:
+        api_base = validate_bale_api_base(get_scoped_secret("BALE_API_BASE_URL") or os.getenv("BALE_API_BASE_URL"), BALE_DEFAULT_API_BASE)
+    except ValueError:
+        return {"success": False, "error": "Invalid Bale API endpoint configuration"}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(f"{api_base}{token}/sendMessage", json={"chat_id": target, "text": text[:BALE_MAX_MESSAGE_LEN]})
         data = resp.json()
         if data.get("ok"):
             mid = str((data.get("result") or {}).get("message_id") or "")
             return {"success": True, "message_id": mid}
-        return {"success": False, "error": str(data.get("description") or data)}
+        return {"success": False, "error": _redact_bale_secret(data.get("description") or data, token)}
 
 
 def _env_enablement() -> Optional[dict]:
@@ -642,8 +656,59 @@ from urllib.parse import urlparse as _urlparse
 
 _ALLOWED_BALE_HOSTS = {"tapi.bale.ai"}
 _VALID_APPROVAL_CHOICES = {"once", "session", "always", "deny"}
+_BALE_PERSONAL_ONLY_COMMANDS = {"backup", "restore", "fallback", "models"}
+
+
+def _requires_personal_bale_auth(text: str) -> bool:
+    """Require a personally allowlisted user for administrative panel commands."""
+    command = str(text or "").strip()
+    if command.startswith("cmd:"):
+        command = command[4:].strip()
+    if not command.startswith("/"):
+        return False
+    name = command[1:].split(None, 1)[0].split(":", 1)[0].lower()
+    return name in _BALE_PERSONAL_ONLY_COMMANDS
 _MAX_CB_BYTES = 64
+_APPROVAL_CALLBACK_TTL_SECONDS = 600.0
 _MAX_MEDIA_BYTES = 20 * 1024 * 1024
+
+
+def _redact_bale_secret(value: Any, token: str = "") -> str:
+    text = str(value)
+    return text.replace(token, "[REDACTED]") if token else text
+
+
+def _redact_bale_payload(payload: Dict[str, Any], token: str) -> Dict[str, Any]:
+    """Redact the bot token recursively before API errors can reach logs or callers."""
+    def clean(value):
+        if isinstance(value, str):
+            return _redact_bale_secret(value, token)
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()}
+        return value
+    return clean(payload)
+
+
+async def _read_bale_media_stream(response: httpx.Response) -> bytes:
+    """Buffer Bale media only after enforcing the hard 20 MiB limit per streamed chunk."""
+    declared = response.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > _MAX_MEDIA_BYTES:
+                raise ValueError("Bale media exceeds configured maximum size")
+        except ValueError as exc:
+            if "exceeds" in str(exc):
+                raise
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes(chunk_size=65536):
+        total += len(chunk)
+        if total > _MAX_MEDIA_BYTES:
+            raise ValueError("Bale media exceeds configured maximum size")
+        chunks.append(chunk)
+    return b"".join(chunks)
 _NL = chr(10)
 
 
@@ -652,9 +717,18 @@ def validate_bale_api_base(url: Optional[str], default: str = "https://tapi.bale
     raw = (url or "").strip() or default
     parsed = _urlparse(raw)
     if parsed.scheme != "https":
-        raise ValueError(f"Insecure Bale API scheme '{parsed.scheme}'; only 'https' is allowed.")
+        raise ValueError("Bale API endpoint must use HTTPS.")
     if not parsed.hostname or parsed.hostname.lower() not in _ALLOWED_BALE_HOSTS:
-        raise ValueError(f"Untrusted Bale API host '{parsed.hostname}'; allowed: {_ALLOWED_BALE_HOSTS}")
+        raise ValueError("Bale API endpoint host is not allowlisted.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Bale API endpoint must not contain credentials, query, or fragment.")
+    try:
+        if parsed.port not in (None, 443):
+            raise ValueError("Bale API endpoint uses an unsupported port.")
+    except ValueError as exc:
+        raise ValueError("Bale API endpoint has an invalid port.") from exc
+    if parsed.path.rstrip("/") != "/bot":
+        raise ValueError("Bale API endpoint path must be /bot.")
     return raw.rstrip("/")
 
 
@@ -666,7 +740,7 @@ def _audited_bale_init(self, config: Optional[PlatformConfig] = None, **kwargs: 
         config = PlatformConfig(enabled=True, token=os.getenv("BALE_BOT_TOKEN", ""))
     _orig_bale_init(self, config, **kwargs)
     validate_bale_api_base(getattr(self, "api_base", "https://tapi.bale.ai/bot"))
-    self._approval_token_map: Dict[str, Tuple[str, str]] = {}
+    self._approval_token_map: Dict[str, Tuple[str, str, float]] = {}
 
 
 BaleAdapter.__init__ = _audited_bale_init
@@ -687,13 +761,6 @@ def _audited_is_user_authorized(
         return False
 
     extra = getattr(self.config, "extra", None) or {}
-    if (
-        extra.get("allow_all_users") is True
-        or os.getenv("BALE_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
-        or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
-    ):
-        return True
-
     raw_users = extra.get("allowed_users") or os.getenv("BALE_ALLOWED_USERS", "")
     if isinstance(raw_users, (list, tuple, set)):
         allowed_users = {str(x).strip() for x in raw_users if str(x).strip()}
@@ -706,8 +773,17 @@ def _audited_is_user_authorized(
     else:
         allowed_groups = {x.strip() for x in str(raw_groups).split(",") if x.strip()}
 
+    # Sensitive/admin actions always require an explicit personal allowlist entry;
+    # the broad allow-all switch only applies to ordinary conversational access.
     if require_personal_auth:
         return uid in allowed_users
+
+    if (
+        extra.get("allow_all_users") is True
+        or os.getenv("BALE_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+        or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in ("1", "true", "yes")
+    ):
+        return True
 
     if uid in allowed_users:
         return True
@@ -730,8 +806,17 @@ def _build_approval_callback_data(self, request_id: str, session_key: str, choic
         raise ValueError("Empty request_id")
     if not hasattr(self, "_approval_token_map"):
         self._approval_token_map = {}
-    self._approval_token_map[req_clean] = (str(request_id), str(session_key))
-    data = f"ea:{req_clean}:{choice}"
+    now = time.monotonic()
+    for token, (_, _, expires_at) in list(self._approval_token_map.items()):
+        if now >= expires_at:
+            self._approval_token_map.pop(token, None)
+    while len(self._approval_token_map) >= 2048:
+        self._approval_token_map.pop(next(iter(self._approval_token_map)))
+    req_token = secrets.token_urlsafe(9)
+    self._approval_token_map[req_token] = (
+        str(request_id), str(session_key), now + _APPROVAL_CALLBACK_TTL_SECONDS
+    )
+    data = f"ea:{req_token}:{choice}"
     if len(data.encode("utf-8")) > _MAX_CB_BYTES:
         raise ValueError("Callback data exceeds 64-byte limit")
     return data
@@ -831,82 +916,88 @@ BaleAdapter._dispatch_bale_panel_cmd = _dispatch_bale_panel_cmd
 
 
 async def _audited_handle_callback_query(self, cb: Dict[str, Any]) -> None:
+    """Validate callbacks and resolve approvals through the central synchronous queue."""
     cb_id = str(cb.get("id") or "")
     raw_data = str(cb.get("data") or "").strip()
     sender = cb.get("from") or {}
     user_id = str(sender.get("id") or "").strip()
     msg = cb.get("message") or {}
     chat = msg.get("chat") or {}
-    # Crucial Bale fix: fallback to user_id when msg.chat.id is absent in callback_query
     chat_id = str(chat.get("id") or user_id).strip()
     chat_type = str(chat.get("type") or "private").lower()
     is_group = chat_type in ("group", "supergroup", "channel")
 
-    asyncio.create_task(self._safe_answer_cb(cb_id))
-
     if not raw_data or len(raw_data.encode("utf-8")) > _MAX_CB_BYTES:
         logger.warning("Rejected invalid/oversized Bale callback data.")
+        if cb_id:
+            await self._api_request("answerCallbackQuery", json_body={"callback_query_id": cb_id, "text": "Invalid callback.", "show_alert": True})
         return
 
     if raw_data.startswith("ea:"):
         if not self._is_user_authorized(user_id, chat_id, is_group=is_group, require_personal_auth=True):
             logger.warning("Unauthorized Bale approval callback attempt by user_id=%s", user_id)
+            if cb_id:
+                await self._api_request("answerCallbackQuery", json_body={"callback_query_id": cb_id, "text": "Unauthorized caller.", "show_alert": True})
             return
-
         parts = raw_data.split(":")
-        token_map = getattr(self, "_approval_token_map", {})
-        if len(parts) == 3:
-            _, req_token, choice = parts
-            mapped = token_map.get(req_token)
-            if not mapped:
-                logger.warning("Unknown or expired approval request token: %s", req_token)
-                return
-            request_id, session_key = mapped
-        elif len(parts) == 4:
-            _, request_id, session_key, choice = parts
-        else:
-            logger.warning("Malformed approval callback format.")
+        if len(parts) != 3:
+            logger.warning("Malformed Bale approval callback.")
             return
-
+        _, req_token, choice = parts
         if choice not in _VALID_APPROVAL_CHOICES:
-            logger.warning("Rejected invalid approval choice: %s", choice)
+            logger.warning("Rejected invalid Bale approval choice.")
+            return
+        token_map = getattr(self, "_approval_token_map", {})
+        mapped = token_map.get(req_token)
+        if not mapped:
+            logger.warning("Unknown or already-used Bale approval token.")
+            return
+        request_id, session_key, expires_at = mapped
+        if time.monotonic() >= expires_at:
+            token_map.pop(req_token, None)
+            logger.warning("Expired Bale approval token.")
             return
 
-        if not request_id or not session_key:
-            return
-
-        token_map.pop(request_id, None)
-        resolver = getattr(self, "resolve_gateway_approval", None)
-        if callable(resolver):
-            res = resolver(request_id, session_key, choice)
-            if asyncio.iscoroutine(res):
-                await res
+        # Consume the one-time token before resolving; no await occurs between lookup and pop.
+        token_map.pop(req_token, None)
+        from tools.approval import resolve_gateway_approval
+        resolved = resolve_gateway_approval(
+            session_key=session_key,
+            choice=choice,
+            request_id=request_id,
+        )
+        status = "Approval recorded." if resolved else "Approval is no longer pending."
+        if cb_id:
+            await self._api_request("answerCallbackQuery", json_body={"callback_query_id": cb_id, "text": status})
+        if resolved and chat_id and msg.get("message_id"):
+            await self.edit_message(
+                chat_id, str(msg["message_id"]),
+                f"{msg.get('text') or ''}\\n\\nDecision: {choice.upper()} (by {user_id})",
+                force_final=True,
+            )
         return
 
-    if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
-        logger.warning("Unauthorized Bale callback from user_id=%s", user_id)
-        return
-
-    cmd = raw_data
-    if cmd.startswith("cmd:"):
-        cmd = cmd[4:].strip()
+    cmd = raw_data[4:].strip() if raw_data.startswith("cmd:") else raw_data
     if not cmd.startswith("/"):
         cmd = "/" + cmd
-
+    require_personal_auth = _requires_personal_bale_auth(cmd)
+    if not self._is_user_authorized(
+        user_id, chat_id, is_group=is_group, require_personal_auth=require_personal_auth
+    ):
+        logger.warning("Unauthorized Bale callback from user_id=%s", user_id)
+        if cb_id:
+            await self._api_request("answerCallbackQuery", json_body={"callback_query_id": cb_id, "text": "Unauthorized caller.", "show_alert": True})
+        return
     if await self._dispatch_bale_panel_cmd(cmd, chat_id, user_id):
         return
-
-    # Otherwise synthesize an inbound message update so original _handle_message / _process_update routes it to Agent
     synthetic_msg = {
         "message_id": msg.get("message_id") or 0,
         "from": sender or {"id": user_id},
         "chat": {"id": chat_id, "type": chat_type},
         "text": cmd,
     }
-    if hasattr(self, "_handle_inbound_message"):
-        await self._handle_inbound_message(synthetic_msg)
-    elif hasattr(self, "_handle_message_update"):
-        await self._handle_message_update(synthetic_msg)
+    if hasattr(self, "_handle_message_update"):
+        await self._handle_message_update(synthetic_msg, int(synthetic_msg["message_id"] or 0))
 
 
 BaleAdapter._handle_callback_query = _audited_handle_callback_query
