@@ -384,7 +384,7 @@ class BaleAdapter(BasePlatformAdapter):
 
             # GW-12: Sanitize filename against path traversal
             safe_name = Path(filename or Path(file_path).name or "file.bin").name
-            safe_name = re.sub(r"[ -/\]", "_", safe_name) or "file.bin"
+            safe_name = re.sub(r"[-/\]", "_", safe_name) or "file.bin"
 
             if media_kind == "image":
                 return cache_image_from_bytes(raw_bytes, safe_name)
