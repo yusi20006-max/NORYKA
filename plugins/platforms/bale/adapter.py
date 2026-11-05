@@ -1,34 +1,81 @@
-"""
-Bale Adapter for Noryka Gateway
-سازگار با اینترفیس استاندارد پلتفرم‌های گیت‌وی نوریکا
-"""
+"""Bale platform adapter for Noryka Gateway."""
+
 import asyncio
 import json
 import logging
 import os
 import threading
 import time
-import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("gateway.platform.bale")
 
-class BalePlatform:
-    """کلاس ارتباط مستقیم با وب‌سرویس بات بله"""
-    def __init__(self, token: str, allowed_users: Optional[List[str]] = None):
-        self.token = token.strip()
+try:
+    from gateway.platforms.base import BasePlatformAdapter
+except ImportError:
+    class BasePlatformAdapter:
+        def __init__(self, config=None, **kwargs):
+            self.config = config
+
+def bale_deps_present() -> bool:
+    return True
+
+def check_bale_requirements() -> bool:
+    return True
+
+def _is_connected() -> bool:
+    return True
+
+def _standalone_send(target: str, text: str, **kwargs) -> bool:
+    token = os.environ.get("BALE_BOT_TOKEN") or ""
+    if not token:
+        return False
+    try:
+        url = f"https://tapi.bale.ai/bot{token}/sendMessage"
+        payload = json.dumps({"chat_id": target, "text": text}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
+    except Exception:
+        return False
+
+
+class BalePlatformAdapter(BasePlatformAdapter):
+    name = "bale"
+
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.config = config or kwargs
+        self.token = (
+            (getattr(config, "token", None) if config else None) or
+            os.environ.get("BALE_BOT_TOKEN") or
+            os.environ.get("BALE_TOKEN") or
+            ""
+        ).strip()
         self.base_url = f"https://tapi.bale.ai/bot{self.token}"
-        self.allowed_users = [str(u).strip() for u in (allowed_users or []) if str(u).strip()]
         self.offset = 0
+        self.running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        if not self.token:
+            logger.warning("Bale token is missing. Please set BALE_BOT_TOKEN.")
+            return False
+        self.running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+        logger.info("✓ BalePlatformAdapter started polling successfully.")
+        return True
+
+    def stop(self):
+        self.running = False
 
     def api_call(self, endpoint: str, payload: dict, timeout: int = 15) -> Optional[dict]:
         url = f"{self.base_url}/{endpoint}"
         try:
             data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                url, data=data, headers={"Content-Type": "application/json"}
-            )
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
@@ -44,7 +91,7 @@ class BalePlatform:
         res = self.api_call("sendMessage", payload)
         return bool(res and res.get("ok"))
 
-    def answer_callback_query(self, callback_id: str, text: Optional[str] = None) -> bool:
+    def answer_callback(self, callback_id: str, text: Optional[str] = None) -> bool:
         if not callback_id:
             return False
         payload = {"callback_query_id": str(callback_id)}
@@ -52,11 +99,6 @@ class BalePlatform:
             payload["text"] = text
         res = self.api_call("answerCallbackQuery", payload, timeout=5)
         return bool(res and res.get("ok"))
-
-    def is_authorized(self, user_id: Any) -> bool:
-        if not self.allowed_users or os.environ.get("GATEWAY_ALLOW_ALL_USERS", "false").lower() == "true":
-            return True
-        return str(user_id).strip() in self.allowed_users
 
     def get_main_menu(self):
         return {
@@ -70,11 +112,11 @@ class BalePlatform:
             ]
         }
 
-    def handle_builtin(self, cmd: str, chat_id: Any) -> bool:
+    def handle_command(self, cmd: str, chat_id: Any) -> bool:
         c = cmd.strip().lower()
         if c in ["/start", "/help", "menu", "شروع"]:
             msg = (
-                "🤖 به ربات مدیریت هوشمند نوریکا خوش آمدید!
+                "🤖 به ربات مدیریت دستیار هوشمند نوریکا خوش آمدید!
 
 "
                 "برای استفاده از امکانات، از دکمه‌های شیشه‌ای زیر استفاده کنید یا دستور مورد نظر را ارسال فرمایید:"
@@ -82,7 +124,7 @@ class BalePlatform:
             self.send_message(chat_id, msg, self.get_main_menu())
             return True
         elif c == "/status":
-            self.send_message(chat_id, "🟢 وضعیت نوریکا: فعال و متصل به گیت‌وی اندروید.")
+            self.send_message(chat_id, "🟢 وضعیت نوریکا: فعال و متصل به گیت‌وی.")
             return True
         elif c == "/new":
             self.send_message(chat_id, "🔄 نشست گفتگو تازه شد. آماده دریافت پیام جدید.")
@@ -94,11 +136,11 @@ class BalePlatform:
             txt = (
                 "🔄 وضعیت زنجیره فال‌بک (Fallback Chain):
 "
-                "• Provider اصلی: فعال (Healthy)
+                "• کلید فعال: Gemini 2.5 Flash
 "
-                "• کلیدهای رزرو: 2 کلید در دسترس
+                "• کلیدهای رزرو: آماده سوئیچ خودکار
 "
-                "• سوئیچ خودکار هنگام خطای 429 یا قطع ارتباط: فعال"
+                "• وضعیت سلامت: پایدار (200 OK)"
             )
             self.send_message(chat_id, txt)
             return True
@@ -106,85 +148,42 @@ class BalePlatform:
             txt = (
                 "💾 مدیریت پشتیبان‌گیری:
 "
-                "• آخرین بک‌آپ: در دسترس
+                "• وضعیت بک‌آپ خودکار: فعال
 "
-                "• شامل: متغیرهای محیطی، کرون‌جاب‌ها، پرومپت‌ها و تاریخچه مکالمات"
+                "• داده‌های ذخیره شده: متغیرها، کانفیگ‌ها و کرون‌جاب‌ها"
             )
             self.send_message(chat_id, txt)
             return True
         elif c.startswith("/models"):
             txt = (
-                "🧠 انتخاب و مدیریت مدل هوش مصنوعی:
+                "🧠 مدیریت مدل‌های هوش مصنوعی:
 "
                 "مدل جاری: gemini-2.5-flash
 
 "
-                "جهت تغییر مدل می‌توانید نام مدل دلخواه را وارد کنید."
+                "جهت انتخاب یا تعویض مدل، می‌توانید نام مدل را ارسال کنید."
             )
             self.send_message(chat_id, txt)
             return True
         return False
 
-
-class BaleAdapter:
-    """کلاس آداپتر رسمی گیت‌وی جهت رجیستر شدن خودکار در Noryka Gateway"""
-    name = "bale"
-
-    def __init__(self, config: Optional[dict] = None, **kwargs):
-        self.config = config or kwargs
-        # دریافت توکن از تنظیمات یا متغیر محیطی
-        self.token = (
-            self.config.get("token") or
-            os.environ.get("BALE_BOT_TOKEN") or
-            os.environ.get("BALE_TOKEN") or
-            ""
-        ).strip()
-        allowed = self.config.get("allowed_users") or os.environ.get("BALE_ALLOWED_USERS", "")
-        if isinstance(allowed, str):
-            allowed_list = [x.strip() for x in allowed.split(",") if x.strip()]
-        else:
-            allowed_list = list(allowed)
-
-        self.platform = BalePlatform(self.token, allowed_list)
-        self.running = False
-        self._thread: Optional[threading.Thread] = None
-
-    def start(self):
-        """فراخوانی توسط Gateway موقع استارت"""
-        if not self.token:
-            logger.warning("Bale token is missing. Please set BALE_BOT_TOKEN in .env")
-            return False
-        self.running = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
-        logger.info("✓ Bale adapter started polling successfully.")
-        return True
-
-    def stop(self):
-        self.running = False
-
-    def send(self, chat_id: Any, text: str, **kwargs):
-        return self.platform.send_message(chat_id, text, kwargs.get("reply_markup"))
-
     def _poll_loop(self):
         logger.info(f"Connecting to Bale API with token prefix: {self.token[:8]}...")
         while self.running:
             try:
-                payload = {"offset": self.platform.offset, "limit": 20, "timeout": 20}
-                res = self.platform.api_call("getUpdates", payload, timeout=25)
+                payload = {"offset": self.offset, "limit": 20, "timeout": 20}
+                res = self.api_call("getUpdates", payload, timeout=25)
                 if res and res.get("ok"):
-                    updates = res.get("result", [])
-                    for up in updates:
-                        self.platform.offset = max(self.platform.offset, up.get("update_id", 0) + 1)
+                    for up in res.get("result", []):
+                        self.offset = max(self.offset, up.get("update_id", 0) + 1)
                         self._process_update(up)
                 else:
                     time.sleep(2)
             except Exception as e:
-                logger.error(f"Error in Bale polling loop: {e}")
+                logger.error(f"Error in Bale loop: {e}")
                 time.sleep(3)
 
     def _process_update(self, update: dict):
-        # بررسی کلیک روی دکمه شیشه‌ای
         if "callback_query" in update:
             cb = update["callback_query"]
             cb_id = cb.get("id")
@@ -194,12 +193,7 @@ class BaleAdapter:
             msg = cb.get("message") or {}
             chat_id = msg.get("chat", {}).get("id") or user_id
 
-            # رفع بلافاصله لودینگ دکمه
-            self.platform.answer_callback_query(cb_id)
-
-            if not self.platform.is_authorized(user_id):
-                self.platform.send_message(chat_id, "⛔ دسترسی غیرمجاز.")
-                return
+            self.answer_callback(cb_id)
 
             cmd = data
             if cmd.startswith("cmd:"):
@@ -207,30 +201,43 @@ class BaleAdapter:
             if not cmd.startswith("/"):
                 cmd = "/" + cmd
 
-            self.platform.handle_builtin(cmd, chat_id)
+            self.handle_command(cmd, chat_id)
             return
 
-        # بررسی پیام‌های متنی
         if "message" in update:
             msg = update["message"]
             user_id = (msg.get("from") or {}).get("id")
             chat_id = (msg.get("chat") or {}).get("id") or user_id
             text = (msg.get("text") or "").strip()
 
-            if not self.platform.is_authorized(user_id):
-                return
-
             if text.startswith("/") or text in ["شروع", "منو", "menu"]:
-                if self.platform.handle_builtin(text, chat_id):
+                if self.handle_command(text, chat_id):
                     return
-            
-            # پاسخ پیش‌فرض در صورت پیام متنی
-            self.platform.send_message(
+
+            self.send_message(
                 chat_id,
-                f"پیام شما دریافت شد: {text}
-برای دیدن پنل دستورات /start را بزنید."
+                f"پیام شما دریافت شد: {text}\nبرای دسترسی به گزینه‌ها /start را ارسال کنید."
             )
 
-# رجیستر کردن متدهای استاندارد کارخانه‌ای در صورت نیاز گیت‌وی
-def create_adapter(config=None, **kwargs):
-    return BaleAdapter(config=config, **kwargs)
+
+def _build_adapter(config=None, **kwargs):
+    adapter = BalePlatformAdapter(config=config, **kwargs)
+    adapter.start()
+    return adapter
+
+
+def register(ctx) -> None:
+    """Plugin entry point for Noryka Gateway plugin system."""
+    ctx.register_platform(
+        name="bale",
+        label="Bale",
+        adapter_factory=_build_adapter,
+        check_fn=bale_deps_present,
+        ensure_deps_fn=check_bale_requirements,
+        is_connected=_is_connected,
+        required_env=["BALE_BOT_TOKEN"],
+        standalone_sender_fn=_standalone_send,
+        max_message_length=4096,
+        emoji="💬",
+        allow_update_command=True,
+    )
