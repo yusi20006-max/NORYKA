@@ -349,13 +349,17 @@ class BaleAdapter(BasePlatformAdapter):
 
         raw_chat_type = str(chat.get("type") or "private").lower()
         is_group = raw_chat_type in ("group", "supergroup", "channel")
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        require_personal_auth = _requires_personal_bale_auth(text)
 
-        # Fail-closed authorization gate before media download or turn creation
-        if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
+        # Fail-closed authorization gate before media download or turn creation.
+        # Group membership grants conversation access, never administrative command access.
+        if not self._is_user_authorized(
+            user_id, chat_id, is_group=is_group, require_personal_auth=require_personal_auth
+        ):
             logger.warning("BaleAdapter: unauthorized message from user_id=%s in chat_id=%s dropped.", user_id, chat_id)
             return
 
-        text = (msg.get("text") or msg.get("caption") or "").strip()
         msg_type, media_urls, media_types = await self._extract_media(msg)
         if not text and not media_urls:
             return
@@ -652,6 +656,18 @@ from urllib.parse import urlparse as _urlparse
 
 _ALLOWED_BALE_HOSTS = {"tapi.bale.ai"}
 _VALID_APPROVAL_CHOICES = {"once", "session", "always", "deny"}
+_BALE_PERSONAL_ONLY_COMMANDS = {"backup", "restore", "fallback", "models"}
+
+
+def _requires_personal_bale_auth(text: str) -> bool:
+    """Require a personally allowlisted user for administrative panel commands."""
+    command = str(text or "").strip()
+    if command.startswith("cmd:"):
+        command = command[4:].strip()
+    if not command.startswith("/"):
+        return False
+    name = command[1:].split(None, 1)[0].split(":", 1)[0].lower()
+    return name in _BALE_PERSONAL_ONLY_COMMANDS
 _MAX_CB_BYTES = 64
 _APPROVAL_CALLBACK_TTL_SECONDS = 600.0
 _MAX_MEDIA_BYTES = 20 * 1024 * 1024
@@ -959,15 +975,17 @@ async def _audited_handle_callback_query(self, cb: Dict[str, Any]) -> None:
             )
         return
 
-    if not self._is_user_authorized(user_id, chat_id, is_group=is_group):
+    cmd = raw_data[4:].strip() if raw_data.startswith("cmd:") else raw_data
+    if not cmd.startswith("/"):
+        cmd = "/" + cmd
+    require_personal_auth = _requires_personal_bale_auth(cmd)
+    if not self._is_user_authorized(
+        user_id, chat_id, is_group=is_group, require_personal_auth=require_personal_auth
+    ):
         logger.warning("Unauthorized Bale callback from user_id=%s", user_id)
         if cb_id:
             await self._api_request("answerCallbackQuery", json_body={"callback_query_id": cb_id, "text": "Unauthorized caller.", "show_alert": True})
         return
-
-    cmd = raw_data[4:].strip() if raw_data.startswith("cmd:") else raw_data
-    if not cmd.startswith("/"):
-        cmd = "/" + cmd
     if await self._dispatch_bale_panel_cmd(cmd, chat_id, user_id):
         return
     synthetic_msg = {
