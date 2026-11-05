@@ -77,7 +77,10 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
             "https://tapi.bale.ai/bot",
         )
         for url in ("http://tapi.bale.ai/bot", "https://evil.example/bot",
-                    "https://tapi.bale.ai.evil.example/bot"):
+                    "https://tapi.bale.ai.evil.example/bot",
+                    "https://user:pass@tapi.bale.ai/bot",
+                    "https://tapi.bale.ai:8443/bot",
+                    "https://tapi.bale.ai/bot?redirect=evil"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 validate_bale_api_base(url)
 
@@ -87,6 +90,13 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
             result = await _standalone_send("1001", "hello")
         self.assertFalse(result["success"])
         self.assertEqual(result["error"], "Invalid Bale API endpoint configuration")
+
+    async def test_api_exception_payload_redacts_bot_token(self):
+        self.adapter._client = MagicMock()
+        self.adapter._client.get = AsyncMock(side_effect=RuntimeError(TEST_TOKEN))
+        result = await self.adapter._api_request("getMe", max_retries=0)
+        self.assertNotIn(TEST_TOKEN, result["description"])
+        self.assertIn("[REDACTED]", result["description"])
 
     def test_gw04_secret_redaction(self):
         self.assertNotIn(TEST_TOKEN, _redact_bale_secret(
