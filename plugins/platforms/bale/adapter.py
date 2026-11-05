@@ -251,7 +251,7 @@ class BaleAdapter(BasePlatformAdapter):
             except Exception as exc:
                 self._consecutive_poll_failures += 1
                 delay = jittered_backoff(self._consecutive_poll_failures, base=1.5, cap=30.0)
-                logger.debug("Bale polling error (%s); sleeping %.1fs", exc, delay)
+                logger.debug("Bale polling error (%s); sleeping %.1fs", _redact_bale_secret(exc, self.token), delay)
                 await asyncio.sleep(delay)
 
     async def _dispatch_update(self, upd: Dict[str, Any], update_id: int) -> None:
@@ -701,9 +701,18 @@ def validate_bale_api_base(url: Optional[str], default: str = "https://tapi.bale
     raw = (url or "").strip() or default
     parsed = _urlparse(raw)
     if parsed.scheme != "https":
-        raise ValueError(f"Insecure Bale API scheme '{parsed.scheme}'; only 'https' is allowed.")
+        raise ValueError("Bale API endpoint must use HTTPS.")
     if not parsed.hostname or parsed.hostname.lower() not in _ALLOWED_BALE_HOSTS:
-        raise ValueError(f"Untrusted Bale API host '{parsed.hostname}'; allowed: {_ALLOWED_BALE_HOSTS}")
+        raise ValueError("Bale API endpoint host is not allowlisted.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Bale API endpoint must not contain credentials, query, or fragment.")
+    try:
+        if parsed.port not in (None, 443):
+            raise ValueError("Bale API endpoint uses an unsupported port.")
+    except ValueError as exc:
+        raise ValueError("Bale API endpoint has an invalid port.") from exc
+    if parsed.path.rstrip("/") != "/bot":
+        raise ValueError("Bale API endpoint path must be /bot.")
     return raw.rstrip("/")
 
 
