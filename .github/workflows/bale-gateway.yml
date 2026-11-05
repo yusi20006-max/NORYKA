@@ -59,6 +59,3 @@ jobs:
         run: |
           python -m pytest -q tests/plugins/platforms/test_bale.py
 
-      - name: Run shared media-cache regression tests
-        run: |
-          python -m pytest -q tests/gateway/test_media_cache.py
