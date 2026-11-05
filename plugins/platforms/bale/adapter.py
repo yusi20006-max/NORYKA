@@ -788,8 +788,16 @@ def _build_approval_callback_data(self, request_id: str, session_key: str, choic
         raise ValueError("Empty request_id")
     if not hasattr(self, "_approval_token_map"):
         self._approval_token_map = {}
+    now = time.monotonic()
+    for token, (_, _, expires_at) in list(self._approval_token_map.items()):
+        if now >= expires_at:
+            self._approval_token_map.pop(token, None)
+    while len(self._approval_token_map) >= 2048:
+        self._approval_token_map.pop(next(iter(self._approval_token_map)))
     req_token = secrets.token_urlsafe(9)
-    self._approval_token_map[req_token] = (str(request_id), str(session_key), time.monotonic() + _APPROVAL_CALLBACK_TTL_SECONDS)
+    self._approval_token_map[req_token] = (
+        str(request_id), str(session_key), now + _APPROVAL_CALLBACK_TTL_SECONDS
+    )
     data = f"ea:{req_token}:{choice}"
     if len(data.encode("utf-8")) > _MAX_CB_BYTES:
         raise ValueError("Callback data exceeds 64-byte limit")
