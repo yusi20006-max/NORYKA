@@ -62,7 +62,20 @@ from typing import Callable, Dict, List, Optional, Tuple
 # The CI lane selector owns the platforms() spec resolver; share it so the
 # "skipped on this host" note and the lanes can never disagree.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts
+try:
+    from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts
+except ModuleNotFoundError as exc:
+    if exc.name not in {"scripts.ci", "scripts.ci.list_os_marked_tests"}:
+        raise
+
+    # The optional CI lane metadata is absent from some source distributions.
+    # It is used only for the informational off-host summary below; pytest's
+    # own skip/xfail marks remain authoritative for test execution.
+    def gated_specs(_text: str) -> list[str]:
+        return []
+
+    def spec_hosts(_spec: str) -> set[str]:
+        return set()
 
 
 def _sweep_killed_run_roots(root: str) -> None:

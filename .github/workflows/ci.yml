@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+  pull_request:
+    branches:
+      - main
+    types: [ready_for_review, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noryka-ci-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-lock:
+    name: Resolve and validate uv.lock
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.resolve.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - id: resolve
+        name: Validate the committed dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+      - name: Preserve the resolved lock for the test matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-lock-${{ github.run_id }}
+          path: uv.lock
+          if-no-files-found: error
+          retention-days: 3
+  tests:
+    name: Python ${{ matrix.python-version }} tests
+    needs: resolve-lock
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: uv-lock-${{ github.run_id }}
+          path: .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - name: Install the locked core and test dependencies
+        run: uv sync --python ${{ matrix.python-version }} --frozen --extra test --no-install-project
+      - name: Run every checked-in pytest suite with per-file isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NORYKA_PYTHON="$PWD/.venv/bin/python"
+          bash scripts/run_tests.sh \
+            tests/test_noryka_smoke.py \
+            tests/test_termux_target.py \
+            skills/productivity/microsoft-office/tests/test_docx_skill.py \
+            skills/productivity/microsoft-office/tests/test_powerpoint_skill.py \
+            skills/productivity/microsoft-office/tests/test_xlsx_skill.py \
+            skills/productivity/pdf/tests/test_pdf_skill.py
+      - name: Lint the new regression test
+        run: uv run --python ${{ matrix.python-version }} --frozen --extra test --no-sync ruff check tests/test_termux_target.py
+
+  shell-validation:
+    name: Shell syntax and static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Bash syntax
+        run: |
+          bash -n setup-noryka.sh
+          bash -n install-noryka-termux.sh
+          bash -n scripts/termux/target.sh
+      - name: Validate shell scripts with ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          shellcheck --severity=error setup-noryka.sh install-noryka-termux.sh scripts/termux/target.sh
+
+  termux-install:
+    name: Native Termux/Bionic install smoke test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NORYKA in a clean ARM64 Termux container and smoke-test it
+        shell: bash
+        run: |
+          set -euo pipefail
+          termux_workspace="$RUNNER_TEMP/noryka-termux-workspace"
+          mkdir -p "$termux_workspace"
+          tar --exclude=.git -cf - . | tar -xf - -C "$termux_workspace"
+          chmod -R a+rwX "$termux_workspace"
+          container_id=$(docker create --platform linux/arm64 \
+            --env NORYKA_VENV_DIR=/data/data/com.termux/files/usr/tmp/noryka-ci-venv \
+            --volume "$termux_workspace:/workspace" \
+            --workdir /workspace \
+            termux/termux-docker@sha256:c14ffb703abf44f2d3bf7fdffdcc50df7d1454d09c705be190e0342a0b47f303 \
+            bash -lc 'sleep 3600')
+          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker start "$container_id" >/dev/null
+          sleep 30
+          if [[ "$(docker inspect -f '{{.State.Running}}' "$container_id")" != "true" ]]; then
+            echo "Termux bootstrap exited; starting the same container again after bootstrap."
+            docker start "$container_id" >/dev/null
+            sleep 30
+          fi
+          if [[ "$(docker inspect -f '{{.State.Running}}' "$container_id")" != "true" ]]; then
+            docker logs "$container_id" || true
+            echo "::error::Termux container failed to stay running after bootstrap."
+            exit 1
+          fi
+          docker exec --user 1000:1000 "$container_id" bash -lc '
+            set -euo pipefail
+            mkdir -p "$PREFIX/etc/apt"
+            printf "deb https://packages.termux.dev/apt/termux-main stable main\\n" > "$PREFIX/etc/apt/sources.list"
+            apt-get update
+            export NORYKA_SKIP_PKG_UPDATE=1
+            echo NORYKA_TERMUX_INSTALL_COMMAND_STARTED
+            bash ./install-noryka-termux.sh
+            /data/data/com.termux/files/usr/tmp/noryka-ci-venv/bin/python -m pip install "pytest>=8.3,<9"
+            /data/data/com.termux/files/usr/tmp/noryka-ci-venv/bin/python -m pytest -q tests/test_noryka_smoke.py tests/test_termux_target.py
+            /data/data/com.termux/files/usr/tmp/noryka-ci-venv/bin/noryka --help
+            echo NORYKA_TERMUX_INSTALL_AND_SMOKE_TESTS_PASSED
+          '
+
+  lockfile-policy:
+    name: Require committed dependency lock
+    if: always()
+    needs:
+      - resolve-lock
+      - tests
+      - shell-validation
+      - termux-install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the resolved lockfile to be committed
+        env:
+          LOCK_CHANGED: ${{ needs.resolve-lock.outputs.changed }}
+          RESOLVE_RESULT: ${{ needs.resolve-lock.result }}
+          TEST_RESULT: ${{ needs.tests.result }}
+          SHELL_RESULT: ${{ needs.shell-validation.result }}
+          TERMUX_RESULT: ${{ needs.termux-install.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$RESOLVE_RESULT" != "success" ]]; then
+            echo "::error::Dependency lock resolution did not complete."
+            exit 1
+          fi
+          if [[ "$LOCK_CHANGED" == "true" ]]; then
+            echo "::error::uv.lock is missing or stale. Commit the generated lockfile and rerun CI."
+            exit 1
+          fi
+          if [[ "$TEST_RESULT" != "success" || "$SHELL_RESULT" != "success" || "$TERMUX_RESULT" != "success" ]]; then
+            echo "::error::One or more required CI jobs did not pass."
+            exit 1
+          fi
+          echo "Committed lockfile and all required CI jobs are green."
