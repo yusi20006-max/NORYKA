@@ -1,3 +1,7 @@
-from plugins.platforms.bale.adapter import register
+# Bale platform plugin for Noryka
+from .adapter import BaleAdapter, BalePlatform
 
-__all__ = ["register"]
+def get_adapter(*args, **kwargs):
+    return BaleAdapter(*args, **kwargs)
+
+__all__ = ["BaleAdapter", "BalePlatform", "get_adapter"]
