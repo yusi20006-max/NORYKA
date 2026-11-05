@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from gateway.config import PlatformConfig
+from gateway.run_adapters import GatewayAdapterLifecycleMixin
 from gateway.platforms.base import BasePlatformAdapter, ExecApprovalPrompt, MessageType, SendResult
 from plugins.platforms.bale.adapter import (
     BaleAdapter,
@@ -50,6 +51,27 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         register(ctx)
         ctx.register_platform.assert_called_once()
         self.assertEqual(ctx.register_platform.call_args.kwargs["name"], "bale")
+
+    def test_gw02_gateway_runner_wires_agent_message_handler(self):
+        handler = AsyncMock()
+        session_store = object()
+        runner = SimpleNamespace(
+            _primary_message_handler=lambda: handler,
+            _handle_adapter_fatal_error=MagicMock(),
+            session_store=session_store,
+            _primary_busy_session_handler=lambda: AsyncMock(),
+            _recover_telegram_topic_thread_id=MagicMock(),
+            _make_adapter_auth_check=MagicMock(return_value=MagicMock()),
+            _primary_platform_event_handler=lambda: AsyncMock(),
+            _busy_text_mode="replace",
+            _busy_text_timing=(0.1, 0.5),
+            _human_delay=(0, 0),
+            _handle_reaction_event=MagicMock(),
+            _transfer_telegram_root_dm=MagicMock(),
+        )
+        GatewayAdapterLifecycleMixin._wire_adapter_handlers(runner, self.adapter)
+        self.assertIs(self.adapter._message_handler, handler)
+        self.assertIs(self.adapter._session_store, session_store)
 
     def test_gw03_gw07_fail_closed_and_group_policy(self):
         self.assertFalse(self.adapter._is_user_authorized("9999", "9999"))
