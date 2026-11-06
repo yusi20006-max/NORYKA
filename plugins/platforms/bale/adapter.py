@@ -28,7 +28,6 @@ from agent.retry_utils import jittered_backoff
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import (
     apply_yaml_bridge,
-    env_is_connected,
     extra_or_secret,
     get_scoped_secret,
     platform_gate_env,
@@ -77,7 +76,13 @@ def check_requirements() -> bool:
 
 
 def is_connected(config: Optional[PlatformConfig] = None) -> bool:
-    return env_is_connected("BALE_BOT_TOKEN", config, extra_key="token")
+    """Connected when a bot token is configured (PlatformConfig.token or env); the SDK being
+    importable is not enough, or the plugin-enable pass would enable Bale unconfigured."""
+    token = getattr(config, "token", None) if config is not None else None
+    if not token:
+        import noryka_cli.gateway as gateway_mod
+        token = gateway_mod.get_env_value("BALE_BOT_TOKEN") or ""
+    return bool(str(token).strip())
 
 
 class BaleAdapter(BasePlatformAdapter):
@@ -622,6 +627,7 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> Optional[dict]:
 
 
 def register(ctx: Any) -> None:
+    from . import gateway_env  # env -> GatewayConfig bridge (gateway.config_env)
     ctx.register_platform(
         name="bale",
         label="Bale Messenger (بله)",
@@ -635,8 +641,6 @@ def register(ctx: Any) -> None:
         apply_yaml_config_fn=_apply_yaml_config,
         cron_deliver_env_var="BALE_HOME_CHANNEL",
         standalone_sender_fn=_standalone_send,
-        allowed_users_env="BALE_ALLOWED_USERS",
-        allow_all_env="BALE_ALLOW_ALL_USERS",
         max_message_length=BALE_MAX_MESSAGE_LEN,
         emoji="🟢",
         allow_update_command=True,
@@ -644,6 +648,9 @@ def register(ctx: Any) -> None:
             "You are communicating with the user on Bale Messenger (پیام‌رسان بله). "
             "Keep formatting clean and concise; messages are capped at 4096 characters."
         ),
+        env_overrides=gateway_env.ENV_OVERRIDES,
+        env_enable_credentials=gateway_env.ENV_ENABLE_CREDENTIALS,
+        **gateway_env.AUTHZ,
     )
 
 

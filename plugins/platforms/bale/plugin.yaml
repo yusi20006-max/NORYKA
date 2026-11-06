@@ -1,5 +1,41 @@
 name: bale
-version: 1.0.0
-description: Bale messenger platform adapter for Noryka Gateway
-entry_point: plugins.platforms.bale
-enabled: true
+label: Bale Messenger (بله)
+kind: platform
+version: 1.1.0
+description: >
+  Bale Messenger (پیام‌رسان بله) gateway adapter for Noryka Agent.
+  Connects to Bale's Bot API (https://tapi.bale.ai) and relays messages
+  between Bale chats/groups and the Noryka agent. Supports native media,
+  inline approval keyboards, streaming edits, and per-user/group allowlists.
+author: Noryka Team
+requires_env:
+  - name: BALE_BOT_TOKEN
+    description: "Bot token from @BotFather on Bale Messenger (tapi.bale.ai)"
+    prompt: "Bale bot token"
+    url: "https://tapi.bale.ai"
+    password: true
+optional_env:
+  - name: BALE_ALLOWED_USERS
+    description: "Comma-separated Bale user IDs allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: BALE_ALLOWED_GROUPS
+    description: "Comma-separated Bale group chat IDs allowed to talk to the bot"
+    prompt: "Allowed groups (comma-separated)"
+    password: false
+  - name: BALE_ALLOW_ALL_USERS
+    description: "Allow any Bale user to trigger the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: BALE_HOME_CHANNEL
+    description: "Default Bale chat ID for cron / notification delivery"
+    prompt: "Home channel chat ID"
+    password: false
+  - name: BALE_API_BASE_URL
+    description: "Custom Bale Bot API base URL (default https://tapi.bale.ai/bot)"
+    prompt: "Bale API base URL (or empty)"
+    password: false
+  - name: BALE_STREAM_THROTTLE
+    description: "Minimum seconds between streamed message edits (default 2.0)"
+    prompt: "Stream edit throttle in seconds (or empty)"
+    password: false

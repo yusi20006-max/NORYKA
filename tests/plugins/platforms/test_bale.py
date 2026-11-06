@@ -12,15 +12,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from gateway.config import PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platform_registry import PlatformEntry, PlatformRegistry
 from gateway.run_adapters import GatewayAdapterLifecycleMixin
 from gateway.platforms.base import BasePlatformAdapter, ExecApprovalPrompt, MessageType, SendResult
+from noryka_cli.plugins_discovery import gate_manifest
+from noryka_cli.plugins_manifest import parse_manifest_file
 from plugins.platforms.bale.adapter import (
     BaleAdapter,
     _redact_bale_secret,
+    is_connected,
     register,
     validate_bale_api_base,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+BALE_PLUGIN_DIR = REPO_ROOT / "plugins" / "platforms" / "bale"
 
 
 TEST_TOKEN = "123456789:ABCDEF_TEST_ONLY"
@@ -51,6 +58,69 @@ class TestBaleGateway(unittest.IsolatedAsyncioTestCase):
         register(ctx)
         ctx.register_platform.assert_called_once()
         self.assertEqual(ctx.register_platform.call_args.kwargs["name"], "bale")
+
+    def _registered_entry(self) -> PlatformEntry:
+        """The PlatformEntry the plugin's register() declares, built the way PluginContext does."""
+        ctx = MagicMock()
+        register(ctx)
+        kwargs = dict(ctx.register_platform.call_args.kwargs)
+        name = kwargs.pop("name")
+        label = kwargs.pop("label")
+        return PlatformEntry(name=name, label=label, source="plugin", plugin_name="bale", **kwargs)
+
+    def test_bundled_bale_manifest_is_deferred_without_plugins_enabled(self):
+        """A bundled platform must register lazily even when plugins.enabled is empty. The old
+        manifest dropped ``kind: platform``, so the gate treated Bale as an opt-in standalone
+        plugin and skipped it — the gateway then logged 'No adapter available for enabled bale'."""
+        manifest = parse_manifest_file(
+            BALE_PLUGIN_DIR / "plugin.yaml", BALE_PLUGIN_DIR, "bundled", ""
+        )
+        self.assertIsNotNone(manifest)
+        self.assertEqual(manifest.kind, "platform")
+        self.assertEqual(gate_manifest(manifest, set(), None).action, "defer")
+
+    def test_register_forwards_env_bridge_and_authz(self):
+        entry = self._registered_entry()
+        self.assertEqual(entry.env_enable_credentials, ("BALE_BOT_TOKEN",))
+        self.assertTrue(entry.env_overrides)
+        self.assertEqual(entry.allowed_users_env, "BALE_ALLOWED_USERS")
+        self.assertEqual(entry.allow_all_env, "BALE_ALLOW_ALL_USERS")
+        self.assertTrue(entry.allowlist_suppresses_pairing)
+
+    def test_registered_entry_creates_bale_adapter(self):
+        registry = PlatformRegistry()
+        registry.register(self._registered_entry())
+        self.assertTrue(registry.is_registered("bale"))
+        adapter = registry.create_adapter(
+            "bale", PlatformConfig(enabled=True, token=TEST_TOKEN, extra={})
+        )
+        self.assertIsInstance(adapter, BaleAdapter)
+
+    def test_env_only_setup_enables_bale_via_env_bridge(self):
+        from gateway.config_env import _apply_plugin_env_overrides
+
+        config = GatewayConfig()
+        _apply_plugin_env_overrides(config, [self._registered_entry()])
+        bale = config.platforms.get(Platform.BALE)
+        self.assertIsNotNone(bale)
+        self.assertTrue(bale.enabled)
+        self.assertEqual(bale.token, TEST_TOKEN)
+
+    def test_enable_pass_uses_connected_check_not_crashing(self):
+        from gateway.config_env import _enable_plugin_platform
+
+        config = GatewayConfig()
+        with patch("noryka_cli.gateway.get_env_value", return_value=TEST_TOKEN):
+            _enable_plugin_platform(config, self._registered_entry())
+        self.assertTrue(config.platforms[Platform.BALE].enabled)
+
+    def test_is_connected_reads_config_token_then_env(self):
+        self.assertTrue(is_connected(PlatformConfig(enabled=True, token=TEST_TOKEN)))
+        with patch("noryka_cli.gateway.get_env_value", return_value=TEST_TOKEN):
+            self.assertTrue(is_connected(PlatformConfig(enabled=True)))
+        with patch("noryka_cli.gateway.get_env_value", return_value=""):
+            self.assertFalse(is_connected(PlatformConfig(enabled=True)))
+
 
     def test_gw02_gateway_runner_wires_agent_message_handler(self):
         handler = AsyncMock()
