@@ -157,6 +157,9 @@ def test_bale_adapter_full_poll_updates_loop_and_media_download() -> None:
 
     cfg = PlatformConfig(enabled=True, token="111111:TEST_TOKEN", extra={"allowed_users": "12345"})
     adapter = BaleAdapter(cfg)
+    # Compact one-time approval callback (ea:<token>:<choice>); the adapter no longer accepts the
+    # legacy 4-part request-id form, so build the payload the same way the approval prompt does.
+    approval_callback = adapter.build_approval_callback_data("req123", "bale_12345", "once")
 
     async def fake_handler(event: MessageEvent) -> None:
         captured_events.append(event)
@@ -193,7 +196,7 @@ def test_bale_adapter_full_poll_updates_loop_and_media_download() -> None:
                                     "id": "cb_999",
                                     "from": {"id": 12345, "first_name": "Yousef"},
                                     "message": {"message_id": 800, "chat": {"id": 12345, "type": "private"}},
-                                    "data": "ea:req123:bale_12345:once",
+                                    "data": approval_callback,
                                 },
                             },
                         ],
